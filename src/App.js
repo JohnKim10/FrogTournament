@@ -745,7 +745,7 @@ export default function FrogTournament(){
                                 {bye?"— BYE —":empty?"TBD":members.map(p=>p?.name??"?").join(" & ")}
                               </span>
                               {win&&!bye&&<span style={{fontSize:champ?15:12,flexShrink:0}}>{champ?"🏆":"✓"}</span>}
-                              {bothReal&&!bye&&<input type="number" min="0" style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,fontFamily:"inherit",color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,outline:"none",flexShrink:0}} value={match[sf]} onChange={e=>updateBracketScore(rIdx,mIdx,sf,e.target.value)} placeholder="—"/>}
+                              {bothReal&&!bye&&<input type="number" min="0" key={match.id+sf} style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,fontFamily:"inherit",color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,outline:"none",flexShrink:0}} defaultValue={match[sf]} onBlur={e=>updateBracketScore(rIdx,mIdx,sf,e.target.value)} placeholder="—"/>}
                             </div>
                           </div>
                         );
@@ -795,9 +795,9 @@ export default function FrogTournament(){
                   <div key={mIdx} style={S.matchCard}>
                     <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={players} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <input type="number" min="0" style={S.scoreInput} value={match.score1} onChange={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
-                      <span style={{fontWeight:900,color:C.gray,fontSize:13}}>vs</span>
-                      <input type="number" min="0" style={S.scoreInput} value={match.score2} onChange={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
+                      <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
+                      <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
+                      <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
                     </div>
                     <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={players} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                   </div>
