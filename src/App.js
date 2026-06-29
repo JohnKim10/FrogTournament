@@ -299,7 +299,7 @@ function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingNam
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
-const TABS_NORMAL=["Players","Round Robin","Standings","Playoffs"];
+const TABS_NORMAL=["Players","All Play","Standings","Playoffs"];
 const TABS_POOL=["Players","Pool Setup","Pool Play","Pool Standings","Playoffs"];
 
 export default function FrogTournament(){
@@ -341,12 +341,13 @@ export default function FrogTournament(){
     catch(e){}
   },[players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides]);
 
+  const [confirmingClear, setConfirmingClear] = useState(false);
+
   function clearAll(){
-    if(!window.confirm("Clear all tournament data and start fresh?"))return;
     setPlayers([]);setRrMode("rotating");setRrNumRounds(3);setRrRounds([]);setPlayoffNumRounds(2);
     setBracketRounds([]);setNextId(1);setPoolPlay(false);setNumPools(2);setPoolAssignments({});
     setPoolRounds({});setAdvanceCount(2);setPlayoffPairingMode("best-worst");
-    setManualPlayoffPairs([]);setPoolQualifierOverrides({});setTab(0);
+    setManualPlayoffPairs([]);setPoolQualifierOverrides({});setTab(0);setConfirmingClear(false);
     try{localStorage.removeItem(STORAGE_KEY);}catch(e){}
   }
 
@@ -428,14 +429,9 @@ export default function FrogTournament(){
     const qualifiers=[];
     for(let p=0;p<numPools;p++){
       const st=getPoolStandings(p);
-      const overrides=poolQualifierOverrides[p]||[];
-      // Use overrides if set, otherwise take top N by standings
-      let advancing;
-      if(overrides.length>0){
-        advancing=overrides;
-      } else {
-        advancing=st.slice(0,advanceCount);
-      }
+      const overrides=poolQualifierOverrides[p];
+      // If overrides exist, use them; otherwise advance everyone
+      const advancing=overrides!==undefined?overrides:st;
       advancing.forEach((entry,rank)=>{
         qualifiers.push({entry,pool:p,rank,seed:`P${p+1}#${rank+1}`});
       });
@@ -603,7 +599,7 @@ export default function FrogTournament(){
     return team.filter(Boolean).map(p=>p?.name||"?").join(" & ");
   }
 
-  function NumSelect({value,onChange,label,max}){
+  function NumSelect({value,onChange,label,max,unit="round"}){
     if(!max)return(
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <span style={{fontWeight:700,fontSize:13,color:C.greenDark}}>{label}</span>
@@ -614,7 +610,7 @@ export default function FrogTournament(){
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <span style={{fontWeight:700,fontSize:13,color:C.greenDark}}>{label}</span>
         <select style={S.numSelect} value={value} onChange={e=>onChange(Number(e.target.value))}>
-          {Array.from({length:max},(_,i)=>i+1).map(n=><option key={n} value={n}>{n} {n===1?"round":"rounds"}</option>)}
+          {Array.from({length:max},(_,i)=>i+1).map(n=><option key={n} value={n}>{n} {n===1?unit:`${unit}s`}</option>)}
         </select>
       </div>
     );
@@ -646,13 +642,26 @@ export default function FrogTournament(){
 
   // ── Standings Table
   function StandingsTable({entries,mode,showQualify,poolIdx}){
-    const qualifiers=poolQualifierOverrides[poolIdx]||[];
+    const overrides=poolQualifierOverrides[poolIdx];
+    // If no overrides set, everyone advances by default
     function isQualified(entry){
-      if(qualifiers.length>0){
+      if(overrides===undefined)return true; // all advance by default
+      const key=mode==="fixed"?entry.players.map(p=>p.id).sort().join("-"):String(entry.id);
+      return overrides.some(q=>{const qk=mode==="fixed"?q.players.map(p=>p.id).sort().join("-"):String(q.id);return qk===key;});
+    }
+    function toggleQualifier(entry,checked){
+      setPoolQualifierOverrides(prev=>{
+        // Start from current overrides or all entries
+        const cur=prev[poolIdx]!==undefined?[...prev[poolIdx]]:[...entries];
         const key=mode==="fixed"?entry.players.map(p=>p.id).sort().join("-"):String(entry.id);
-        return qualifiers.some(q=>{const qk=mode==="fixed"?q.players.map(p=>p.id).sort().join("-"):String(q.id);return qk===key;});
-      }
-      return entries.indexOf(entry)<advanceCount;
+        if(checked){
+          // Add back
+          return{...prev,[poolIdx]:[...cur,entry]};
+        } else {
+          // Remove
+          return{...prev,[poolIdx]:cur.filter(q=>{const qk=mode==="fixed"?q.players.map(p=>p.id).sort().join("-"):String(q.id);return qk!==key;})};
+        }
+      });
     }
     return(
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
@@ -677,14 +686,7 @@ export default function FrogTournament(){
                 <td style={{...S.td(i),textAlign:"center",fontWeight:700,color:entry.diff>=0?C.greenMid:C.red}}>{entry.diff>=0?`+${entry.diff}`:entry.diff}</td>
                 {showQualify&&(
                   <td style={{...S.td(i),textAlign:"center"}}>
-                    <input type="checkbox" checked={qual} onChange={e=>{
-                      setPoolQualifierOverrides(prev=>{
-                        const cur=[...(prev[poolIdx]||entries.slice(0,advanceCount))];
-                        const k=mode==="fixed"?entry.players.map(p=>p.id).sort().join("-"):String(entry.id);
-                        if(e.target.checked){return{...prev,[poolIdx]:[...cur,entry]};}
-                        else{return{...prev,[poolIdx]:cur.filter(q=>{const qk=mode==="fixed"?q.players.map(p=>p.id).sort().join("-"):String(q.id);return qk!==k;})};}
-                      });
-                    }}/>
+                    <input type="checkbox" checked={qual} onChange={e=>toggleQualifier(entry,e.target.checked)}/>
                   </td>
                 )}
               </tr>
@@ -857,14 +859,22 @@ export default function FrogTournament(){
           <div>
             <div style={S.card}>
               <div style={S.sectionTitle}>🐸 Player Roster <span style={{...S.badge(C.greenMid),fontSize:11}}>{players.length} players</span>
-                <button style={{...S.smallBtn("red"),marginLeft:"auto",fontSize:11}} onClick={clearAll}>🗑 Clear All</button>
+                {confirmingClear?(
+                  <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:13,color:C.red,fontWeight:700}}>Clear everything?</span>
+                    <button style={S.smallBtn("red")} onClick={clearAll}>Yes, clear</button>
+                    <button style={S.smallBtn("ghost")} onClick={()=>setConfirmingClear(false)}>Cancel</button>
+                  </div>
+                ):(
+                  <button style={{...S.smallBtn("red"),marginLeft:"auto",fontSize:13}} onClick={()=>setConfirmingClear(true)}>🗑 Clear All</button>
+                )}
               </div>
 
               {/* Format toggle */}
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:13,fontWeight:700,color:C.greenDark,marginBottom:6}}>Tournament Format</div>
                 <div style={{display:"flex",borderRadius:8,overflow:"hidden",border:`1.5px solid ${C.grayLight}`,width:"fit-content"}}>
-                  <button style={S.modeBtn(!poolPlay)} onClick={()=>{setPoolPlay(false);setTab(0);}}>🔄 Round Robin</button>
+                  <button style={S.modeBtn(!poolPlay)} onClick={()=>{setPoolPlay(false);setTab(0);}}>🏃 All Play</button>
                   <button style={S.modeBtn(poolPlay)} onClick={()=>{setPoolPlay(true);setTab(0);}}>🏊 Pool Play</button>
                 </div>
               </div>
@@ -912,13 +922,11 @@ export default function FrogTournament(){
                 <div style={{marginBottom:16,padding:"14px 16px",borderRadius:10,background:C.cream,border:`1.5px solid ${C.grayLight}`}}>
                   <div style={{fontSize:13,fontWeight:800,color:C.greenDark,marginBottom:10}}>🏊 Pool Settings</div>
                   <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:10}}>
-                    <NumSelect value={numPools} onChange={v=>{setNumPools(v);setPoolAssignments({});}} label="Number of pools:" max={Math.max(2,Math.floor(players.length/2))}/>
-                    <NumSelect value={advanceCount} onChange={setAdvanceCount} label="Advance per pool:" max={8}/>
+                    <NumSelect value={numPools} onChange={v=>{setNumPools(v);setPoolAssignments({});}} label="Number of pools:" max={Math.max(2,Math.floor(players.length/2))} unit="pool"/>
                   </div>
                   <div style={{fontSize:12,color:C.gray}}>
-                    {poolUnits.length} {rrMode==="fixed"?"teams":"players"} → ~{Math.ceil(poolUnits.length/numPools)} per pool · {advanceCount*numPools} total qualifiers
+                    {poolUnits.length} {rrMode==="fixed"?"teams":"players"} → ~{Math.ceil(poolUnits.length/numPools)} per pool · Uncheck in Pool Standings to remove qualifiers
                   </div>
-                  {advanceCount*numPools%2!==0&&<div style={{fontSize:12,color:C.amber,marginTop:4}}>⚠️ Odd number of qualifiers — consider adjusting to create even teams</div>}
                 </div>
               )}
 
@@ -975,7 +983,7 @@ export default function FrogTournament(){
                 </button>
               ):(
                 <button style={S.bigBtn("blue")} onClick={generateRR} disabled={players.length<4}>
-                  🎲 Generate Round Robin Schedule
+                  🎲 Generate All Play Schedule
                 </button>
               )}
               {players.length<4&&<span style={{color:C.limeLight,fontSize:13,alignSelf:"center"}}>Need at least 4 players</span>}
