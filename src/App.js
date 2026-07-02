@@ -178,15 +178,12 @@ function buildBracketFromPairs(rankedPairs,numRounds){
 
 function buildBracketRounds(individualStandings,numRounds){
   const n=Math.pow(2,numRounds);
-  const players=[...individualStandings];
-  if(players.length%2!==0)players.push(BYE);
+  let players=[...individualStandings];
+  if(players.length%2!==0)players=players.slice(0,-1); // odd count: last place sits out, no free pairing
   const pairs=[];
   for(let i=0;i<players.length/2;i++){
     const top=players[i],bot=players[players.length-1-i];
-    if(isBye(top)&&isBye(bot))pairs.push({players:BYE,seed:null});
-    else if(isBye(bot))pairs.push({players:[top],seed:i+1});
-    else if(isBye(top))pairs.push({players:[bot],seed:players.length-i});
-    else pairs.push({players:[top,bot],seed:i+1});
+    pairs.push({players:[top,bot],seed:i+1});
   }
   const seeded=pairs.slice(0,n);
   while(seeded.length<n)seeded.push({players:BYE,seed:null});
@@ -334,12 +331,69 @@ export default function FrogTournament(){
   const [pinningPlayerId,setPinningPlayerId]=useState(null);
   const [rrEditingName,setRrEditingName]=useState(null);
   const [swapTarget,setSwapTarget]=useState(null);
+  const [showSaveModal,setShowSaveModal]=useState(false);
+  const [saveFileName,setSaveFileName]=useState("");
+  const [toast,setToast]=useState("");
+  const importFileRef=useRef(null);
+
+  function currentStateSnapshot(){
+    return{players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides};
+  }
 
   // Persist
   useEffect(()=>{
     try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides}));}
     catch(e){}
   },[players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides]);
+
+  useEffect(()=>{
+    if(!toast)return;
+    const t=setTimeout(()=>setToast(""),2500);
+    return()=>clearTimeout(t);
+  },[toast]);
+
+  function exportSave(name){
+    const payload={__frogTournamentSave:true,name,savedAt:new Date().toISOString(),state:currentStateSnapshot()};
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const safeName=(name||"frog-tournament").trim().replace(/[^a-z0-9\-_ ]/gi,"").replace(/\s+/g,"-")||"frog-tournament";
+    const a=document.createElement("a");
+    a.href=url;a.download=`${safeName}.json`;
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setShowSaveModal(false);setSaveFileName("");
+    setToast(`Saved "${name||safeName}"`);
+  }
+
+  function importSave(file){
+    const reader=new FileReader();
+    reader.onload=()=>{
+      try{
+        const parsed=JSON.parse(reader.result);
+        const s=parsed?.state??parsed; // support raw state or wrapped save file
+        setPlayers(s.players??[]);
+        setRrMode(s.rrMode??"rotating");
+        setRrNumRounds(s.rrNumRounds??3);
+        setRrRounds(s.rrRounds??[]);
+        setPlayoffNumRounds(s.playoffNumRounds??2);
+        setBracketRounds(s.bracketRounds??[]);
+        setNextId(s.nextId??1);
+        setPoolPlay(s.poolPlay??false);
+        setNumPools(s.numPools??2);
+        setPoolAssignments(s.poolAssignments??{});
+        setPoolRounds(s.poolRounds??{});
+        setAdvanceCount(s.advanceCount??2);
+        setPlayoffPairingMode(s.playoffPairingMode??"best-worst");
+        setManualPlayoffPairs(s.manualPlayoffPairs??[]);
+        setPoolQualifierOverrides(s.poolQualifierOverrides??{});
+        setTab(0);
+        setToast(parsed?.name?`Loaded "${parsed.name}"`:"Loaded save file");
+      }catch(e){
+        setToast("Couldn't read that file — is it a valid save?");
+      }
+    };
+    reader.readAsText(file);
+  }
 
   const [confirmingClear, setConfirmingClear] = useState(false);
 
@@ -844,8 +898,31 @@ export default function FrogTournament(){
           {pinnedPairs.length>0&&<span style={{...S.badge(C.amber),fontSize:13}}>{pinnedPairs.length} Pairs</span>}
           {!poolPlay&&rrRounds.length>0&&<span style={{...S.badge(C.blue),fontSize:13}}>{rrRounds.length} Games/Player</span>}
           {bracketRounds.length>0&&<span style={{...S.badge(C.green),fontSize:13}}>{bracketRounds.length}-Round Bracket</span>}
+          <button style={S.smallBtn("green")} onClick={()=>{setSaveFileName("");setShowSaveModal(true);}}>💾 Save</button>
+          <button style={S.smallBtn("ghost")} onClick={()=>importFileRef.current?.click()}>📂 Import</button>
+          <input ref={importFileRef} type="file" accept="application/json,.json" style={{display:"none"}}
+            onChange={e=>{const f=e.target.files?.[0];if(f)importSave(f);e.target.value="";}}/>
         </div>
       </div>
+
+      {toast&&(
+        <div style={{position:"fixed",bottom:20,right:20,zIndex:1200,background:C.greenDark,color:C.white,padding:"10px 18px",borderRadius:10,fontWeight:700,fontSize:14,boxShadow:"0 6px 24px rgba(0,0,0,0.25)"}}>
+          {toast}
+        </div>
+      )}
+
+      {showSaveModal&&(
+        <div style={S.overlay} onClick={()=>setShowSaveModal(false)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <div style={{fontWeight:800,fontSize:16,color:C.greenDark,marginBottom:6}}>💾 Save tournament</div>
+            <div style={{fontSize:13,color:C.gray,marginBottom:16}}>Name this save. It'll download as a file you can Import later to restore all players and settings.</div>
+            <input style={{...S.input,width:"100%",boxSizing:"border-box"}} placeholder="e.g. Summer Slam 2026" value={saveFileName}
+              onChange={e=>setSaveFileName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&exportSave(saveFileName)} autoFocus/>
+            <button style={{...S.smallBtn("green"),marginTop:14,width:"100%"}} onClick={()=>exportSave(saveFileName)}>Download Save</button>
+            <button style={{...S.smallBtn("ghost"),marginTop:8,width:"100%",background:C.grayLight}} onClick={()=>setShowSaveModal(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div style={S.tabBar}>
