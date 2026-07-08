@@ -1015,10 +1015,11 @@ export default function FrogTournament(){
               </div>
 
               {/* Player list */}
-              {players.map(p=>{
+              {players.map((p,idx)=>{
                 const partner=p.pinnedPartnerId?players.find(q=>q.id===p.pinnedPartnerId):null;
                 return(
                   <div key={p.id} style={S.playerRow(!!p.pinnedPartnerId)}>
+                    <span style={{fontSize:13,fontWeight:700,color:C.gray,minWidth:20}}>{idx+1}.</span>
                     <span style={{fontSize:18}}>{p.pinnedPartnerId?"📌":"👤"}</span>
                     {editingPlayer?.id===p.id?(
                       <>
