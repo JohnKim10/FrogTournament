@@ -67,16 +67,58 @@ function circleMethodRounds(slots){
   return rounds;
 }
 
-function pairsToDoubles(roundPairs){
-  const matches=[],shuffled=shuffle(roundPairs);
+// Picks which team sits out this round when the team count is odd.
+// forcedIds (round 0 only) lets the caller require two specific players to be the ones who sit out;
+// otherwise the team whose members have sat out the fewest times so far is benched, so nobody
+// sits out twice before everyone else has had a turn.
+function pickBenchTeam(teams,byeCounts,forcedIds){
+  if(teams.length%2===0)return{teams,benched:null};
+  let pool=[...teams];
+  if(forcedIds&&forcedIds.length===2){
+    const[f0,f1]=forcedIds;
+    let teamA=pool.find(t=>t.some(p=>p&&p.id===f0));
+    let teamB=pool.find(t=>t.some(p=>p&&p.id===f1));
+    if(teamA&&teamB){
+      if(teamA!==teamB){
+        const partnerA=teamA.find(p=>p&&p.id!==f0),partnerB=teamB.find(p=>p&&p.id!==f1);
+        const forcedTeam=[teamA.find(p=>p&&p.id===f0),teamB.find(p=>p&&p.id===f1)];
+        pool=pool.filter(t=>t!==teamA&&t!==teamB);
+        pool.push([partnerA,partnerB]);
+        teamA=forcedTeam;
+      }
+      const remaining=pool.filter(t=>t!==teamA);
+      return{teams:remaining,benched:teamA};
+    }
+  }
+  // Rank teams by (worst member's bye count, then total bye count) so we prefer benching
+  // a team that includes someone who hasn't sat out yet over one where everybody already has.
+  let best=null,candidates=[];
+  pool.forEach(t=>{
+    const counts=t.map(p=>byeCounts[p?.id]||0);
+    const score=[Math.max(...counts),counts.reduce((a,b)=>a+b,0)];
+    if(!best||score[0]<best[0]||(score[0]===best[0]&&score[1]<best[1])){best=score;candidates=[t];}
+    else if(score[0]===best[0]&&score[1]===best[1])candidates.push(t);
+  });
+  const benched=candidates[Math.floor(Math.random()*candidates.length)];
+  return{teams:pool.filter(t=>t!==benched),benched};
+}
+
+function pairsToDoubles(roundPairs,byeCounts,forcedIds){
+  const{teams,benched}=pickBenchTeam(roundPairs,byeCounts||{},forcedIds);
+  if(benched)benched.forEach(p=>{if(p&&byeCounts)byeCounts[p.id]=(byeCounts[p.id]||0)+1;});
+  const matches=[],shuffled=shuffle(teams);
   for(let i=0;i+1<shuffled.length;i+=2)matches.push({team1:shuffled[i],team2:shuffled[i+1],score1:"",score2:""});
   return matches;
 }
 
-function buildRRSchedule(slots,numRounds){
-  const unique=circleMethodRounds(slots);
+function buildRRSchedule(slots,numRounds,firstRoundByeIds){
+  // Shuffle before running the circle method so the fixed rotation isn't anchored to
+  // whatever order players happen to be listed in (that anchoring was skewing who ended
+  // up teamed together, and in turn who kept getting picked to sit out).
+  const unique=circleMethodRounds(shuffle(slots));
   if(unique.length===0)return[];
-  return Array.from({length:numRounds},(_,r)=>pairsToDoubles(unique[r%unique.length]));
+  const byeCounts={};
+  return Array.from({length:numRounds},(_,r)=>pairsToDoubles(unique[r%unique.length],byeCounts,r===0?firstRoundByeIds:null));
 }
 
 // Fixed RR: teams circle-rotate against each other
@@ -97,10 +139,10 @@ function generateFixedRoundRobin(players,numRounds){
 }
 
 // Rotating RR: individuals rotate partners
-function generateRotatingRoundRobin(players,numRounds){
+function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds){
   const{pinnedPairs,free}=extractPinnedPairs(players);
   if(free.length===0)return buildRRSchedule(pinnedPairs,numRounds);
-  const freeRounds=buildRRSchedule(free,numRounds);
+  const freeRounds=buildRRSchedule(free,numRounds,firstRoundByeIds);
   return freeRounds.map(roundMatches=>{
     if(pinnedPairs.length===0)return roundMatches;
     const allTeams=[...pinnedPairs];
@@ -111,9 +153,9 @@ function generateRotatingRoundRobin(players,numRounds){
   });
 }
 
-function generateRoundRobinRounds(players,mode,numRounds){
+function generateRoundRobinRounds(players,mode,numRounds,firstRoundByeIds){
   if(players.length<4)return[];
-  return mode==="fixed"?generateFixedRoundRobin(players,numRounds):generateRotatingRoundRobin(players,numRounds);
+  return mode==="fixed"?generateFixedRoundRobin(players,numRounds):generateRotatingRoundRobin(players,numRounds,firstRoundByeIds);
 }
 
 // ─── Standings ────────────────────────────────────────────────────────────────
@@ -178,7 +220,10 @@ function buildBracketFromPairs(rankedPairs,numRounds){
 
 function buildBracketRounds(individualStandings,numRounds){
   const n=Math.pow(2,numRounds);
-  let players=[...individualStandings];
+  // Only the top n*2 individuals make the playoffs; lower-ranked players sit out entirely
+  // (e.g. an 8-team bracket from 10 players leaves the #9 and #10 seeds out) rather than
+  // being paired in against the full standings.
+  let players=individualStandings.slice(0,n*2);
   if(players.length%2!==0)players=players.slice(0,-1); // odd count: last place sits out, no free pairing
   const pairs=[];
   for(let i=0;i<players.length/2;i++){
@@ -250,7 +295,7 @@ function getPoolUnits(units, assignments, poolIdx) {
 }
 
 // ─── RR Team Block ────────────────────────────────────────────────────────────
-function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx}){
+function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,roundPlayerIds,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx}){
   if(!team||team.length===0)return<div style={{flex:1}}/>;
   const alignRight=side==="team1";
   return(
@@ -258,9 +303,10 @@ function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingNam
       {team.filter(Boolean).map((p,pi)=>{
         if(!p)return null;
         const isEditing=rrEditingName?.playerId===p.id;
-        const isSwapping=swapTarget?.rIdx===rIdx&&swapTarget?.mIdx===mIdx&&swapTarget?.poolIdx===poolIdx&&swapTarget?.playerId===p.id;
-        const thisIds=new Set(team.filter(Boolean).map(x=>x.id));
-        const available=players.filter(pl=>!thisIds.has(pl.id));
+        const isSwapping=swapTarget?.rIdx===rIdx&&swapTarget?.mIdx===mIdx&&swapTarget?.poolIdx===poolIdx&&swapTarget?.side===side&&swapTarget?.playerId===p.id;
+        // Only players not already playing elsewhere this round can be swapped in, so a swap can
+        // never create a duplicate (the same player appearing in two spots in one round).
+        const available=players.filter(pl=>!roundPlayerIds.has(pl.id));
         return(
           <div key={p.id} style={{marginBottom:pi>0?0:2}}>
             {pi>0&&<span style={{color:C.gray,fontWeight:400,fontSize:13}}> & </span>}
@@ -331,6 +377,7 @@ export default function FrogTournament(){
   const [pinningPlayerId,setPinningPlayerId]=useState(null);
   const [rrEditingName,setRrEditingName]=useState(null);
   const [swapTarget,setSwapTarget]=useState(null);
+  const [firstRoundByeIds,setFirstRoundByeIds]=useState([]);
   const [showSaveModal,setShowSaveModal]=useState(false);
   const [saveFileName,setSaveFileName]=useState("");
   const [toast,setToast]=useState("");
@@ -402,8 +449,18 @@ export default function FrogTournament(){
     setBracketRounds([]);setNextId(1);setPoolPlay(false);setNumPools(2);setPoolAssignments({});
     setPoolRounds({});setAdvanceCount(2);setPlayoffPairingMode("best-worst");
     setManualPlayoffPairs([]);setPoolQualifierOverrides({});setTab(0);setConfirmingClear(false);
+    setFirstRoundByeIds([]);
     try{localStorage.removeItem(STORAGE_KEY);}catch(e){}
   }
+
+  // ─── Derived: how many players sit out Round 1 of a rotating All Play schedule (0 if none)
+  const rotatingFirstRoundByeInfo = useMemo(()=>{
+    if(rrMode!=="rotating")return{needed:0,eligible:[]};
+    const{free}=extractPinnedPairs(players);
+    const teamCount=Math.floor(free.length/2);
+    const needed=free.length%2===0&&teamCount%2===1?2:0;
+    return{needed,eligible:free};
+  },[players,rrMode]);
 
   // ─── Derived: units for pool play (pairs in fixed, individuals in rotating)
   const poolUnits = useMemo(()=>{
@@ -465,7 +522,8 @@ export default function FrogTournament(){
 
   // ─── Non-pool RR
   function generateRR(){
-    const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds);
+    const byeIds=rotatingFirstRoundByeInfo.needed>0&&firstRoundByeIds.length===rotatingFirstRoundByeInfo.needed?firstRoundByeIds:null;
+    const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds,byeIds);
     setRrRounds(rounds);
     setTab(1);
   }
@@ -797,8 +855,12 @@ export default function FrogTournament(){
                             {si===1&&<div style={{height:1,background:champ?"rgba(255,255,255,0.15)":C.grayLight}}/>}
                             <div style={{display:"flex",alignItems:"center",gap:6,padding:"11px 12px",background:bg,minHeight:50}}>
                               {seed&&!bye&&<span style={{...S.badge(win?C.lime:C.grayLight,win?C.greenDark:C.gray),minWidth:26,textAlign:"center",fontSize:12,padding:"2px 6px",flexShrink:0}}>{seed}</span>}
-                              <span style={{flex:1,fontWeight:win?700:500,fontSize:13,color:nc,fontStyle:(empty||bye)?"italic":"normal",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                                {bye?"— BYE —":empty?"TBD":members.map(p=>p?.name??"?").join(" & ")}
+                              <span title={bye?"":empty?"":members.map(p=>p?.name??"?").join(" & ")} style={{flex:1,minWidth:0,fontWeight:win?700:500,fontSize:13,color:nc,fontStyle:(empty||bye)?"italic":"normal",display:"flex",overflow:"hidden"}}>
+                                {bye?"— BYE —":empty?"TBD":members.map((p,pi)=>(
+                                  <span key={p?.id??pi} style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:pi===0&&members.length>1?1:0,minWidth:pi===0&&members.length>1?"20%":"auto"}}>
+                                    {pi>0&&<span style={{fontWeight:400,color:C.gray}}> & </span>}{p?.name??"?"}
+                                  </span>
+                                ))}
                               </span>
                               {win&&!bye&&<span style={{fontSize:champ?15:12,flexShrink:0}}>{champ?"🏆":"✓"}</span>}
                               {bothReal&&!bye&&<input type="number" min="0" key={match.id+sf} style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,fontFamily:"inherit",color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,outline:"none",flexShrink:0}} defaultValue={match[sf]} onBlur={e=>updateBracketScore(rIdx,mIdx,sf,e.target.value)} placeholder="—"/>}
@@ -833,6 +895,7 @@ export default function FrogTournament(){
 
   // ── Round renderer (reused for both normal RR and pool play)
   function RoundsList({rounds,updateScore,poolIdx=null}){
+    const candidatePlayers=poolIdx!==null?getPool(poolIdx).flat(Infinity):players;
     return rounds.map((round,rIdx)=>{
       const playingIds=new Set();
       round.forEach(m=>[m.team1,m.team2].forEach(t=>{if(Array.isArray(t))t.filter(Boolean).forEach(p=>playingIds.add(p.id));}));
@@ -849,13 +912,13 @@ export default function FrogTournament(){
                 const w=matchWinner(match);
                 return(
                   <div key={mIdx} style={S.matchCard}>
-                    <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={players} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
+                    <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
                       <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
                       <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
                       <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
                     </div>
-                    <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={players} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
+                    <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                   </div>
                 );
               })}
@@ -985,6 +1048,27 @@ export default function FrogTournament(){
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* First-round bye picker (rotating mode, when a team must sit out) */}
+              {!poolPlay&&rotatingFirstRoundByeInfo.needed>0&&(
+                <div style={{marginBottom:16,padding:"14px 16px",borderRadius:10,background:C.cream,border:`1.5px solid ${C.grayLight}`}}>
+                  <div style={{fontSize:13,fontWeight:800,color:C.greenDark,marginBottom:6}}>😴 Round 1 Bye (optional)</div>
+                  <div style={{fontSize:12,color:C.gray,marginBottom:8}}>With {players.length} players, {rotatingFirstRoundByeInfo.needed} will sit out Round 1. Pick who (e.g. players running late) or leave blank to randomize.</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                    {rotatingFirstRoundByeInfo.eligible.map(p=>{
+                      const checked=firstRoundByeIds.includes(p.id);
+                      const disabled=!checked&&firstRoundByeIds.length>=rotatingFirstRoundByeInfo.needed;
+                      return(
+                        <label key={p.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:13,fontWeight:600,padding:"6px 10px",borderRadius:8,background:checked?"#F0FAE8":C.white,border:`1.5px solid ${checked?C.lime:C.grayLight}`,opacity:disabled?0.5:1,cursor:disabled?"not-allowed":"pointer"}}>
+                          <input type="checkbox" checked={checked} disabled={disabled}
+                            onChange={()=>setFirstRoundByeIds(prev=>checked?prev.filter(id=>id!==p.id):[...prev,p.id])}/>
+                          {p.name||"unnamed"}
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
