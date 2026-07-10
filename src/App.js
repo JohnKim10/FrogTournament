@@ -813,7 +813,7 @@ export default function FrogTournament(){
   function BracketView(){
     if(!bracketRounds.length)return null;
     const live=propagateWinners(bracketRounds);
-    const numR=live.length,MATCH_H=100,SLOT_H=180,COL_W=260,GAP_W=52,HEADER_H=44;
+    const numR=live.length,MATCH_H=140,SLOT_H=220,COL_W=320,GAP_W=52,HEADER_H=44;
     const firstCount=live[0].length,totalH=firstCount*SLOT_H,totalW=numR*COL_W+(numR-1)*GAP_W;
     const cy=(r,m)=>{const s=SLOT_H*Math.pow(2,r);return m*s+s/2;};
     const top=(r,m)=>cy(r,m)-MATCH_H/2;
@@ -853,11 +853,11 @@ export default function FrogTournament(){
                         return(
                           <div key={side}>
                             {si===1&&<div style={{height:1,background:champ?"rgba(255,255,255,0.15)":C.grayLight}}/>}
-                            <div style={{display:"flex",alignItems:"center",gap:6,padding:"11px 12px",background:bg,minHeight:50}}>
+                            <div style={{display:"flex",alignItems:"flex-start",gap:6,padding:"11px 12px",background:bg,minHeight:50}}>
                               {seed&&!bye&&<span style={{...S.badge(win?C.lime:C.grayLight,win?C.greenDark:C.gray),minWidth:26,textAlign:"center",fontSize:12,padding:"2px 6px",flexShrink:0}}>{seed}</span>}
-                              <span title={bye?"":empty?"":members.map(p=>p?.name??"?").join(" & ")} style={{flex:1,minWidth:0,fontWeight:win?700:500,fontSize:13,color:nc,fontStyle:(empty||bye)?"italic":"normal",display:"flex",overflow:"hidden"}}>
+                              <span style={{flex:1,minWidth:0,fontWeight:win?700:500,fontSize:13,color:nc,fontStyle:(empty||bye)?"italic":"normal",whiteSpace:"normal",wordBreak:"break-word",lineHeight:1.35,paddingTop:2}}>
                                 {bye?"— BYE —":empty?"TBD":members.map((p,pi)=>(
-                                  <span key={p?.id??pi} style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:pi===0&&members.length>1?1:0,minWidth:pi===0&&members.length>1?"20%":"auto"}}>
+                                  <span key={p?.id??pi}>
                                     {pi>0&&<span style={{fontWeight:400,color:C.gray}}> & </span>}{p?.name??"?"}
                                   </span>
                                 ))}
