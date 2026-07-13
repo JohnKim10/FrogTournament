@@ -71,40 +71,24 @@ function circleMethodRounds(slots){
 // forcedIds (round 0 only) lets the caller require two specific players to be the ones who sit out;
 // otherwise the team whose members have sat out the fewest times so far is benched, so nobody
 // sits out twice before everyone else has had a turn.
-function pickBenchTeam(teams,byeCounts,forcedIds){
+// Picks which team sits out this round when the team count is odd. Ranks teams by
+// (worst member's bye count, then total bye count) so we prefer benching a team that
+// includes someone who hasn't sat out yet over one where everybody already has.
+function pickBenchTeam(teams,byeCounts){
   if(teams.length%2===0)return{teams,benched:null};
-  let pool=[...teams];
-  if(forcedIds&&forcedIds.length===2){
-    const[f0,f1]=forcedIds;
-    let teamA=pool.find(t=>t.some(p=>p&&p.id===f0));
-    let teamB=pool.find(t=>t.some(p=>p&&p.id===f1));
-    if(teamA&&teamB){
-      if(teamA!==teamB){
-        const partnerA=teamA.find(p=>p&&p.id!==f0),partnerB=teamB.find(p=>p&&p.id!==f1);
-        const forcedTeam=[teamA.find(p=>p&&p.id===f0),teamB.find(p=>p&&p.id===f1)];
-        pool=pool.filter(t=>t!==teamA&&t!==teamB);
-        pool.push([partnerA,partnerB]);
-        teamA=forcedTeam;
-      }
-      const remaining=pool.filter(t=>t!==teamA);
-      return{teams:remaining,benched:teamA};
-    }
-  }
-  // Rank teams by (worst member's bye count, then total bye count) so we prefer benching
-  // a team that includes someone who hasn't sat out yet over one where everybody already has.
   let best=null,candidates=[];
-  pool.forEach(t=>{
+  teams.forEach(t=>{
     const counts=t.map(p=>byeCounts[p?.id]||0);
     const score=[Math.max(...counts),counts.reduce((a,b)=>a+b,0)];
     if(!best||score[0]<best[0]||(score[0]===best[0]&&score[1]<best[1])){best=score;candidates=[t];}
     else if(score[0]===best[0]&&score[1]===best[1])candidates.push(t);
   });
   const benched=candidates[Math.floor(Math.random()*candidates.length)];
-  return{teams:pool.filter(t=>t!==benched),benched};
+  return{teams:teams.filter(t=>t!==benched),benched};
 }
 
-function pairsToDoubles(roundPairs,byeCounts,forcedIds){
-  const{teams,benched}=pickBenchTeam(roundPairs,byeCounts||{},forcedIds);
+function pairsToDoubles(roundPairs,byeCounts){
+  const{teams,benched}=pickBenchTeam(roundPairs,byeCounts||{});
   if(benched)benched.forEach(p=>{if(p&&byeCounts)byeCounts[p.id]=(byeCounts[p.id]||0)+1;});
   const matches=[],shuffled=shuffle(teams);
   for(let i=0;i+1<shuffled.length;i+=2)matches.push({team1:shuffled[i],team2:shuffled[i+1],score1:"",score2:""});
@@ -115,10 +99,25 @@ function buildRRSchedule(slots,numRounds,firstRoundByeIds){
   // Shuffle before running the circle method so the fixed rotation isn't anchored to
   // whatever order players happen to be listed in (that anchoring was skewing who ended
   // up teamed together, and in turn who kept getting picked to sit out).
-  const unique=circleMethodRounds(shuffle(slots));
+  const shuffled=shuffle(slots);
+  const unique=circleMethodRounds(shuffled);
   if(unique.length===0)return[];
   const byeCounts={};
-  return Array.from({length:numRounds},(_,r)=>pairsToDoubles(unique[r%unique.length],byeCounts,r===0?firstRoundByeIds:null));
+  // Whoever's picked for the Round 1 bye is simply left out of that round's partner
+  // pairing entirely (rather than needing to land on the same benched team), so this
+  // works no matter how many people end up sitting out.
+  let round0Teams=unique[0];
+  const forced=(firstRoundByeIds||[]).filter(id=>shuffled.some(p=>p.id===id));
+  if(forced.length){
+    const forcedSet=new Set(forced);
+    const active=shuffled.filter(p=>!forcedSet.has(p.id));
+    const activeUnique=circleMethodRounds(active);
+    round0Teams=activeUnique.length>0?activeUnique[0]:[];
+    forcedSet.forEach(id=>{byeCounts[id]=(byeCounts[id]||0)+1;});
+  }
+  const rounds=[pairsToDoubles(round0Teams,byeCounts)];
+  for(let r=1;r<numRounds;r++)rounds.push(pairsToDoubles(unique[r%unique.length],byeCounts));
+  return rounds;
 }
 
 // Fixed RR: teams circle-rotate against each other
@@ -453,12 +452,16 @@ export default function FrogTournament(){
     try{localStorage.removeItem(STORAGE_KEY);}catch(e){}
   }
 
-  // ─── Derived: how many players sit out Round 1 of a rotating All Play schedule (0 if none)
+  // ─── Derived: how many players sit out Round 1 of a rotating All Play schedule (0 if none).
+  // Partners pair up first (one player is left over if the count is odd), then teams are
+  // matched up two at a time (one team sits out if that count is odd) — whatever's left
+  // over after both steps is how many players get no game in Round 1.
   const rotatingFirstRoundByeInfo = useMemo(()=>{
     if(rrMode!=="rotating")return{needed:0,eligible:[]};
     const{free}=extractPinnedPairs(players);
     const teamCount=Math.floor(free.length/2);
-    const needed=free.length%2===0&&teamCount%2===1?2:0;
+    const playingTeams=teamCount-(teamCount%2);
+    const needed=free.length-playingTeams*2;
     return{needed,eligible:free};
   },[players,rrMode]);
 
@@ -522,7 +525,7 @@ export default function FrogTournament(){
 
   // ─── Non-pool RR
   function generateRR(){
-    const byeIds=rotatingFirstRoundByeInfo.needed>0&&firstRoundByeIds.length===rotatingFirstRoundByeInfo.needed?firstRoundByeIds:null;
+    const byeIds=rotatingFirstRoundByeInfo.needed>0&&firstRoundByeIds.length>0?firstRoundByeIds:null;
     const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds,byeIds);
     setRrRounds(rounds);
     setTab(1);
