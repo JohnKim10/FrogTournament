@@ -976,7 +976,14 @@ export default function FrogTournament(){
                   const rows=[{side:"team1",team:match.team1,sf:"score1",seed:match.seed1},{side:"team2",team:match.team2,sf:"score2",seed:match.seed2}];
                   return(
                     <div key={match.id||mIdx} style={{position:"absolute",left:colLeft,top:t,width:COL_W,background:champ?`linear-gradient(135deg,${C.greenDark},${C.green})`:C.white,borderRadius:10,boxShadow:champ?"0 0 16px rgba(126,200,80,0.35)":"0 2px 8px rgba(0,0,0,0.13)",border:champ?`2px solid ${C.lime}`:`1.5px solid ${C.grayLight}`,overflow:"hidden"}}>
-                      {courtsEnabled&&courtLabels.length>0&&!(t1b&&t2b)&&<div style={{padding:"5px 12px 0"}}><span style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10}}>🎾 Court {courtLabels[mIdx%courtLabels.length]}</span></div>}
+                      {courtsEnabled&&courtLabels.length>0&&!(t1b&&t2b)&&(
+                        <div style={{padding:"5px 12px 0"}}>
+                          <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateBracketScore(bracket.id,rIdx,mIdx,"court",e.target.value)}
+                            style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
+                            {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
+                          </select>
+                        </div>
+                      )}
                       {rows.map(({side,team,sf,seed},si)=>{
                         const bye=isBye(team),empty=!bye&&(!team||!Array.isArray(team)||!team.filter(Boolean).length);
                         const win=w===side,members=Array.isArray(team)?team.filter(Boolean):[];
@@ -1089,7 +1096,14 @@ export default function FrogTournament(){
                 const w=matchWinner(match);
                 return(
                   <div key={mIdx}>
-                    {courtsEnabled&&courtLabels.length>0&&<div style={{marginBottom:4}}><span style={{...S.badge(C.grayLight,C.greenDark),fontSize:11}}>🎾 Court {courtLabels[mIdx%courtLabels.length]}</span></div>}
+                    {courtsEnabled&&courtLabels.length>0&&(
+                      <div style={{marginBottom:4}}>
+                        <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateScore(rIdx,mIdx,"court",e.target.value)}
+                          style={{...S.badge(C.grayLight,C.greenDark),fontSize:11,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
+                          {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
+                        </select>
+                      </div>
+                    )}
                     <div style={S.matchCard}>
                       <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                       <div style={{display:"flex",alignItems:"center",gap:6}}>
