@@ -552,15 +552,12 @@ export default function FrogTournament(){
 
   // ─── Generate pool play schedules
   function generatePoolPlay(){
-    const newPoolRounds={};
+    // Build each pool's schedule on its own first — courts aren't factored in yet here,
+    // since all pools play their Round N at the same time and share the same courts.
+    const perPoolUncapped=[];
     for(let p=0;p<numPools;p++){
       const poolUnitList=getPool(p);
-      // Convert units to players list for the generator
-      let poolPlayers;
       if(rrMode==="fixed"){
-        // units are already pairs — pass all players in those pairs
-        poolPlayers=poolUnitList.flat();
-        // Build fixed-style schedule directly from these teams
         const arr=poolUnitList.length%2===0?[...poolUnitList]:[...poolUnitList,null];
         const n=arr.length,half=n/2,rotating=arr.slice(1),uniqueRounds=[];
         for(let r=0;r<n-1;r++){
@@ -568,13 +565,34 @@ export default function FrogTournament(){
           for(let i=0;i<half;i++){const t1=circle[i],t2=circle[n-1-i];if(t1&&t2)round.push({team1:t1,team2:t2,score1:"",score2:""});}
           uniqueRounds.push(round);rotating.unshift(rotating.pop());
         }
-        newPoolRounds[p]=Array.from({length:rrNumRounds},(_,r)=>uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[]);
+        perPoolUncapped[p]=Array.from({length:rrNumRounds},(_,r)=>uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[]);
       } else {
-        // units are individual players
-        poolPlayers=poolUnitList;
-        newPoolRounds[p]=generateRotatingRoundRobin(poolPlayers,rrNumRounds);
+        perPoolUncapped[p]=generateRotatingRoundRobin(poolUnitList,rrNumRounds);
       }
     }
+
+    const newPoolRounds={};
+    for(let p=0;p<numPools;p++)newPoolRounds[p]=perPoolUncapped[p];
+
+    if(courtsEnabled&&courtLabels.length>0){
+      // Every pool's Round N happens at the same time, so the court limit applies across
+      // all of them together — combine each round's matches from every pool, bench the
+      // overflow fairly (same rotation used elsewhere), then hand out court numbers so no
+      // two pools ever get told to use the same court at once.
+      const byeCounts={};
+      for(let p=0;p<numPools;p++)newPoolRounds[p]=[];
+      for(let r=0;r<rrNumRounds;r++){
+        const combined=[];
+        for(let p=0;p<numPools;p++)(perPoolUncapped[p][r]||[]).forEach(m=>combined.push({...m,__pool:p}));
+        const capped=capMatchesToCourts(combined,byeCounts,courtLabels.length);
+        for(let p=0;p<numPools;p++)newPoolRounds[p][r]=[];
+        capped.forEach((m,i)=>{
+          const{__pool,...rest}=m;
+          newPoolRounds[__pool][r].push({...rest,court:courtLabels[i%courtLabels.length]});
+        });
+      }
+    }
+
     setPoolRounds(newPoolRounds);
     setTab(2); // Pool Play tab
   }
