@@ -976,6 +976,7 @@ export default function FrogTournament(){
                   const rows=[{side:"team1",team:match.team1,sf:"score1",seed:match.seed1},{side:"team2",team:match.team2,sf:"score2",seed:match.seed2}];
                   return(
                     <div key={match.id||mIdx} style={{position:"absolute",left:colLeft,top:t,width:COL_W,background:champ?`linear-gradient(135deg,${C.greenDark},${C.green})`:C.white,borderRadius:10,boxShadow:champ?"0 0 16px rgba(126,200,80,0.35)":"0 2px 8px rgba(0,0,0,0.13)",border:champ?`2px solid ${C.lime}`:`1.5px solid ${C.grayLight}`,overflow:"hidden"}}>
+                      {courtsEnabled&&courtLabels.length>0&&!(t1b&&t2b)&&<div style={{padding:"5px 12px 0"}}><span style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10}}>🎾 Court {courtLabels[mIdx%courtLabels.length]}</span></div>}
                       {rows.map(({side,team,sf,seed},si)=>{
                         const bye=isBye(team),empty=!bye&&(!team||!Array.isArray(team)||!team.filter(Boolean).length);
                         const win=w===side,members=Array.isArray(team)?team.filter(Boolean):[];
@@ -1075,7 +1076,7 @@ export default function FrogTournament(){
     return rounds.map((round,rIdx)=>{
       const playingIds=new Set();
       round.forEach(m=>[m.team1,m.team2].forEach(t=>{if(Array.isArray(t))t.filter(Boolean).forEach(p=>playingIds.add(p.id));}));
-      const sittingOut=players.filter(p=>!playingIds.has(p.id));
+      const sittingOut=candidatePlayers.filter(p=>!playingIds.has(p.id));
       return(
         <div key={rIdx} style={{marginBottom:20}}>
           <div style={{...S.card,padding:0,overflow:"hidden"}}>
@@ -1088,7 +1089,7 @@ export default function FrogTournament(){
                 const w=matchWinner(match);
                 return(
                   <div key={mIdx}>
-                    {poolIdx===null&&courtsEnabled&&courtLabels[mIdx]&&<div style={{marginBottom:4}}><span style={{...S.badge(C.grayLight,C.greenDark),fontSize:11}}>🎾 Court {courtLabels[mIdx]}</span></div>}
+                    {courtsEnabled&&courtLabels.length>0&&<div style={{marginBottom:4}}><span style={{...S.badge(C.grayLight,C.greenDark),fontSize:11}}>🎾 Court {courtLabels[mIdx%courtLabels.length]}</span></div>}
                     <div style={S.matchCard}>
                       <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                       <div style={{display:"flex",alignItems:"center",gap:6}}>
@@ -1255,7 +1256,7 @@ export default function FrogTournament(){
               <div style={{marginBottom:16,padding:"14px 16px",borderRadius:10,background:C.cream,border:`1.5px solid ${C.grayLight}`}}>
                 <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:800,fontSize:13,color:C.greenDark,marginBottom:courtsEnabled?10:0}}>
                   <input type="checkbox" checked={courtsEnabled} onChange={e=>setCourtsEnabled(e.target.checked)}/>
-                  🎾 Limit to available courts
+                  🎾 Assign courts to matches
                 </label>
                 {courtsEnabled&&(
                   <>
@@ -1266,7 +1267,7 @@ export default function FrogTournament(){
                       <input style={{...S.input,fontSize:13,padding:"8px 12px",width:260}} placeholder="Custom court numbers, e.g. 3, 5, 7 (optional)" value={customCourtLabels} onChange={e=>setCustomCourtLabels(e.target.value)}/>
                     </div>
                     <div style={{fontSize:12,color:C.gray}}>
-                      Courts: {courtLabels.join(", ")} · at most {courtLabels.length} match{courtLabels.length!==1?"es":""} per round — extra players sit out and rotate fairly
+                      Courts: {courtLabels.join(", ")}{poolPlay?" · matches cycle through these courts":` · at most ${courtLabels.length} match${courtLabels.length!==1?"es":""} per round in All Play — extra players sit out and rotate fairly`}
                     </div>
                   </>
                 )}
