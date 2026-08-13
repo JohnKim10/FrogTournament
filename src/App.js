@@ -71,31 +71,34 @@ function circleMethodRounds(slots){
 // forcedIds (round 0 only) lets the caller require two specific players to be the ones who sit out;
 // otherwise the team whose members have sat out the fewest times so far is benched, so nobody
 // sits out twice before everyone else has had a turn.
-// Picks which team sits out this round when the team count is odd. Ranks teams by
-// (worst member's bye count, then total bye count) so we prefer benching a team that
-// includes someone who hasn't sat out yet over one where everybody already has.
-function pickBenchTeam(teams,byeCounts){
-  if(teams.length%2===0)return{teams,benched:null};
-  let best=null,candidates=[];
-  teams.forEach(t=>{
+// Picks which teams sit out this round: whenever the team count is odd there's always one
+// leftover, and on top of that a court limit can force more out if there isn't a court for
+// every possible match. Ranks teams by (worst member's bye count, then total bye count) so
+// whoever hasn't sat out yet gets benched before anyone sits out a second time.
+function pickBenchTeams(teams,byeCounts,matchLimit){
+  const matchesPossible=Math.floor(teams.length/2);
+  const matchesAllowed=Math.min(matchesPossible,matchLimit??Infinity);
+  const benchCount=teams.length-matchesAllowed*2;
+  if(benchCount<=0)return{teams,benched:[]};
+  const scored=teams.map(t=>{
     const counts=t.map(p=>byeCounts[p?.id]||0);
-    const score=[Math.max(...counts),counts.reduce((a,b)=>a+b,0)];
-    if(!best||score[0]<best[0]||(score[0]===best[0]&&score[1]<best[1])){best=score;candidates=[t];}
-    else if(score[0]===best[0]&&score[1]===best[1])candidates.push(t);
+    return{t,score:[Math.max(...counts),counts.reduce((a,b)=>a+b,0)]};
   });
-  const benched=candidates[Math.floor(Math.random()*candidates.length)];
-  return{teams:teams.filter(t=>t!==benched),benched};
+  for(let i=scored.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[scored[i],scored[j]]=[scored[j],scored[i]];}
+  scored.sort((a,b)=>a.score[0]-b.score[0]||a.score[1]-b.score[1]);
+  const benched=scored.slice(0,benchCount).map(s=>s.t),benchedSet=new Set(benched);
+  return{teams:teams.filter(t=>!benchedSet.has(t)),benched};
 }
 
-function pairsToDoubles(roundPairs,byeCounts){
-  const{teams,benched}=pickBenchTeam(roundPairs,byeCounts||{});
-  if(benched)benched.forEach(p=>{if(p&&byeCounts)byeCounts[p.id]=(byeCounts[p.id]||0)+1;});
+function pairsToDoubles(roundPairs,byeCounts,matchLimit){
+  const{teams,benched}=pickBenchTeams(roundPairs,byeCounts||{},matchLimit);
+  benched.forEach(t=>t.forEach(p=>{if(p&&byeCounts)byeCounts[p.id]=(byeCounts[p.id]||0)+1;}));
   const matches=[],shuffled=shuffle(teams);
   for(let i=0;i+1<shuffled.length;i+=2)matches.push({team1:shuffled[i],team2:shuffled[i+1],score1:"",score2:""});
   return matches;
 }
 
-function buildRRSchedule(slots,numRounds,firstRoundByeIds){
+function buildRRSchedule(slots,numRounds,firstRoundByeIds,matchLimit){
   // Shuffle before running the circle method so the fixed rotation isn't anchored to
   // whatever order players happen to be listed in (that anchoring was skewing who ended
   // up teamed together, and in turn who kept getting picked to sit out).
@@ -115,13 +118,13 @@ function buildRRSchedule(slots,numRounds,firstRoundByeIds){
     round0Teams=activeUnique.length>0?activeUnique[0]:[];
     forcedSet.forEach(id=>{byeCounts[id]=(byeCounts[id]||0)+1;});
   }
-  const rounds=[pairsToDoubles(round0Teams,byeCounts)];
-  for(let r=1;r<numRounds;r++)rounds.push(pairsToDoubles(unique[r%unique.length],byeCounts));
+  const rounds=[pairsToDoubles(round0Teams,byeCounts,matchLimit)];
+  for(let r=1;r<numRounds;r++)rounds.push(pairsToDoubles(unique[r%unique.length],byeCounts,matchLimit));
   return rounds;
 }
 
 // Fixed RR: teams circle-rotate against each other
-function generateFixedRoundRobin(players,numRounds){
+function generateFixedRoundRobin(players,numRounds,matchLimit){
   const{pinnedPairs,free}=extractPinnedPairs(players);
   const shuffledFree=shuffle(free),freePairs=[];
   for(let i=0;i+1<shuffledFree.length;i+=2)freePairs.push([shuffledFree[i],shuffledFree[i+1]]);
@@ -134,27 +137,46 @@ function generateFixedRoundRobin(players,numRounds){
     for(let i=0;i<half;i++){const t1=circle[i],t2=circle[n-1-i];if(t1&&t2)round.push({team1:t1,team2:t2,score1:"",score2:""});}
     uniqueRounds.push(round);rotating.unshift(rotating.pop());
   }
-  return Array.from({length:numRounds},(_,r)=>uniqueRounds[r%uniqueRounds.length]);
-}
-
-// Rotating RR: individuals rotate partners
-function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds){
-  const{pinnedPairs,free}=extractPinnedPairs(players);
-  if(free.length===0)return buildRRSchedule(pinnedPairs,numRounds);
-  const freeRounds=buildRRSchedule(free,numRounds,firstRoundByeIds);
-  return freeRounds.map(roundMatches=>{
-    if(pinnedPairs.length===0)return roundMatches;
-    const allTeams=[...pinnedPairs];
-    roundMatches.forEach(m=>{allTeams.push(m.team1);allTeams.push(m.team2);});
-    const shuffledTeams=shuffle(allTeams),matches=[];
-    for(let i=0;i+1<shuffledTeams.length;i+=2)matches.push({team1:shuffledTeams[i],team2:shuffledTeams[i+1],score1:"",score2:""});
-    return matches;
+  const byeCounts={};
+  return Array.from({length:numRounds},(_,r)=>{
+    const round=uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[];
+    return capMatchesToCourts(round,byeCounts,matchLimit);
   });
 }
 
-function generateRoundRobinRounds(players,mode,numRounds,firstRoundByeIds){
+// Drops the lowest-court-priority matches when there are more matches than available courts,
+// preferring to keep matches whose teams have already sat out before (so the ones who haven't
+// sat out yet get the court this round).
+function capMatchesToCourts(matches,byeCounts,matchLimit){
+  const limit=matchLimit??Infinity;
+  if(matches.length<=limit)return matches;
+  const scored=matches.map(m=>{
+    const counts=[...(m.team1||[]),...(m.team2||[])].filter(Boolean).map(p=>byeCounts[p.id]||0);
+    return{m,score:[Math.max(...counts,0),counts.reduce((a,b)=>a+b,0)]};
+  });
+  for(let i=scored.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[scored[i],scored[j]]=[scored[j],scored[i]];}
+  scored.sort((a,b)=>a.score[0]-b.score[0]||a.score[1]-b.score[1]);
+  const benchCount=matches.length-limit;
+  scored.slice(0,benchCount).forEach(({m})=>{[...(m.team1||[]),...(m.team2||[])].filter(Boolean).forEach(p=>{byeCounts[p.id]=(byeCounts[p.id]||0)+1;});});
+  return scored.slice(benchCount).map(s=>s.m);
+}
+
+// Rotating RR: individuals rotate partners
+function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimit){
+  const{pinnedPairs,free}=extractPinnedPairs(players);
+  if(free.length===0)return buildRRSchedule(pinnedPairs,numRounds,null,matchLimit);
+  const freeRounds=buildRRSchedule(free,numRounds,firstRoundByeIds,Infinity);
+  const byeCounts={};
+  return freeRounds.map(roundMatches=>{
+    const allTeams=[...pinnedPairs];
+    roundMatches.forEach(m=>{allTeams.push(m.team1);allTeams.push(m.team2);});
+    return pairsToDoubles(allTeams,byeCounts,matchLimit);
+  });
+}
+
+function generateRoundRobinRounds(players,mode,numRounds,firstRoundByeIds,matchLimit){
   if(players.length<4)return[];
-  return mode==="fixed"?generateFixedRoundRobin(players,numRounds):generateRotatingRoundRobin(players,numRounds,firstRoundByeIds);
+  return mode==="fixed"?generateFixedRoundRobin(players,numRounds,matchLimit):generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimit);
 }
 
 // ─── Standings ────────────────────────────────────────────────────────────────
@@ -377,20 +399,23 @@ export default function FrogTournament(){
   const [rrEditingName,setRrEditingName]=useState(null);
   const [swapTarget,setSwapTarget]=useState(null);
   const [firstRoundByeIds,setFirstRoundByeIds]=useState([]);
+  const [courtsEnabled,setCourtsEnabled]=useState(saved?.courtsEnabled??false);
+  const [numCourts,setNumCourts]=useState(saved?.numCourts??4);
+  const [customCourtLabels,setCustomCourtLabels]=useState(saved?.customCourtLabels??"");
   const [showSaveModal,setShowSaveModal]=useState(false);
   const [saveFileName,setSaveFileName]=useState("");
   const [toast,setToast]=useState("");
   const importFileRef=useRef(null);
 
   function currentStateSnapshot(){
-    return{players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides};
+    return{players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels};
   }
 
   // Persist
   useEffect(()=>{
-    try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides}));}
+    try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels}));}
     catch(e){}
-  },[players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides]);
+  },[players,rrMode,rrNumRounds,rrRounds,playoffNumRounds,bracketRounds,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,manualPlayoffPairs,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
 
   useEffect(()=>{
     if(!toast)return;
@@ -432,6 +457,9 @@ export default function FrogTournament(){
         setPlayoffPairingMode(s.playoffPairingMode??"best-worst");
         setManualPlayoffPairs(s.manualPlayoffPairs??[]);
         setPoolQualifierOverrides(s.poolQualifierOverrides??{});
+        setCourtsEnabled(s.courtsEnabled??false);
+        setNumCourts(s.numCourts??4);
+        setCustomCourtLabels(s.customCourtLabels??"");
         setTab(0);
         setToast(parsed?.name?`Loaded "${parsed.name}"`:"Loaded save file");
       }catch(e){
@@ -449,21 +477,33 @@ export default function FrogTournament(){
     setPoolRounds({});setAdvanceCount(2);setPlayoffPairingMode("best-worst");
     setManualPlayoffPairs([]);setPoolQualifierOverrides({});setTab(0);setConfirmingClear(false);
     setFirstRoundByeIds([]);
+    setCourtsEnabled(false);setNumCourts(4);setCustomCourtLabels("");
     try{localStorage.removeItem(STORAGE_KEY);}catch(e){}
   }
+
+  // ─── Derived: court labels + the match cap they impose (undefined = no limit)
+  const courtLabels = useMemo(()=>{
+    if(!courtsEnabled)return[];
+    const custom=customCourtLabels.split(",").map(s=>s.trim()).filter(Boolean);
+    if(custom.length)return custom;
+    return Array.from({length:Math.max(1,numCourts)},(_,i)=>String(i+1));
+  },[courtsEnabled,customCourtLabels,numCourts]);
+  const courtMatchLimit = courtsEnabled&&courtLabels.length>0?courtLabels.length:undefined;
 
   // ─── Derived: how many players sit out Round 1 of a rotating All Play schedule (0 if none).
   // Partners pair up first (one player is left over if the count is odd), then teams are
   // matched up two at a time (one team sits out if that count is odd) — whatever's left
-  // over after both steps is how many players get no game in Round 1.
+  // over after both steps (plus anyone extra a court limit forces out) is how many players
+  // get no game in Round 1. Simulated with the real generator so it always matches reality.
   const rotatingFirstRoundByeInfo = useMemo(()=>{
-    if(rrMode!=="rotating")return{needed:0,eligible:[]};
+    if(rrMode!=="rotating"||players.length<4)return{needed:0,eligible:[]};
     const{free}=extractPinnedPairs(players);
-    const teamCount=Math.floor(free.length/2);
-    const playingTeams=teamCount-(teamCount%2);
-    const needed=free.length-playingTeams*2;
-    return{needed,eligible:free};
-  },[players,rrMode]);
+    const round0=generateRotatingRoundRobin(players,1,null,courtMatchLimit)[0]||[];
+    const playingIds=new Set();
+    round0.forEach(m=>[m.team1,m.team2].forEach(t=>t.forEach(p=>p&&playingIds.add(p.id))));
+    const sittingFree=free.filter(p=>!playingIds.has(p.id));
+    return{needed:sittingFree.length,eligible:free};
+  },[players,rrMode,courtMatchLimit]);
 
   // ─── Derived: units for pool play (pairs in fixed, individuals in rotating)
   const poolUnits = useMemo(()=>{
@@ -526,7 +566,7 @@ export default function FrogTournament(){
   // ─── Non-pool RR
   function generateRR(){
     const byeIds=rotatingFirstRoundByeInfo.needed>0&&firstRoundByeIds.length>0?firstRoundByeIds:null;
-    const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds,byeIds);
+    const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds,byeIds,courtMatchLimit);
     setRrRounds(rounds);
     setTab(1);
   }
@@ -631,8 +671,8 @@ export default function FrogTournament(){
     if(rrRounds.length>0&&!poolPlay){
       const updatedPlayers=[...players,p];
       const firstUnscored=rrRounds.findIndex(r=>r.every(m=>m.score1===""&&m.score2===""));
-      if(firstUnscored===-1){const extra=generateRoundRobinRounds(updatedPlayers,rrMode,rrNumRounds);setRrRounds(prev=>[...prev,...extra.slice(prev.length)]);}
-      else{const scored=rrRounds.slice(0,firstUnscored);const newR=generateRoundRobinRounds(updatedPlayers,rrMode,Math.max(rrNumRounds-firstUnscored,1));setRrRounds([...scored,...newR]);}
+      if(firstUnscored===-1){const extra=generateRoundRobinRounds(updatedPlayers,rrMode,rrNumRounds,null,courtMatchLimit);setRrRounds(prev=>[...prev,...extra.slice(prev.length)]);}
+      else{const scored=rrRounds.slice(0,firstUnscored);const newR=generateRoundRobinRounds(updatedPlayers,rrMode,Math.max(rrNumRounds-firstUnscored,1),null,courtMatchLimit);setRrRounds([...scored,...newR]);}
     }
   }
 
@@ -914,14 +954,17 @@ export default function FrogTournament(){
               {round.map((match,mIdx)=>{
                 const w=matchWinner(match);
                 return(
-                  <div key={mIdx} style={S.matchCard}>
-                    <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
-                      <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
-                      <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
+                  <div key={mIdx}>
+                    {poolIdx===null&&courtsEnabled&&courtLabels[mIdx]&&<div style={{marginBottom:4}}><span style={{...S.badge(C.grayLight,C.greenDark),fontSize:11}}>🎾 Court {courtLabels[mIdx]}</span></div>}
+                    <div style={S.matchCard}>
+                      <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
+                        <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
+                        <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
+                      </div>
+                      <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                     </div>
-                    <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
                   </div>
                 );
               })}
@@ -1074,6 +1117,27 @@ export default function FrogTournament(){
                   </div>
                 </div>
               )}
+
+              {/* Court capacity */}
+              <div style={{marginBottom:16,padding:"14px 16px",borderRadius:10,background:C.cream,border:`1.5px solid ${C.grayLight}`}}>
+                <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:800,fontSize:13,color:C.greenDark,marginBottom:courtsEnabled?10:0}}>
+                  <input type="checkbox" checked={courtsEnabled} onChange={e=>setCourtsEnabled(e.target.checked)}/>
+                  🎾 Limit to available courts
+                </label>
+                {courtsEnabled&&(
+                  <>
+                    <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+                      <NumSelect value={numCourts} onChange={setNumCourts} label="Number of courts:"/>
+                    </div>
+                    <div style={{marginBottom:8}}>
+                      <input style={{...S.input,fontSize:13,padding:"8px 12px",width:260}} placeholder="Custom court numbers, e.g. 3, 5, 7 (optional)" value={customCourtLabels} onChange={e=>setCustomCourtLabels(e.target.value)}/>
+                    </div>
+                    <div style={{fontSize:12,color:C.gray}}>
+                      Courts: {courtLabels.join(", ")} · at most {courtLabels.length} match{courtLabels.length!==1?"es":""} per round — extra players sit out and rotate fairly
+                    </div>
+                  </>
+                )}
+              </div>
 
               {/* Games per player */}
               <div style={{marginBottom:16}}>
