@@ -240,8 +240,15 @@ function computeStandings(players,rounds){
       });
     });
   }));
-  return players.map(p=>({...p,...stats[p.id],diff:(stats[p.id]?.pointsFor||0)-(stats[p.id]?.pointsAgainst||0)}))
-    .sort((a,b)=>b.wins!==a.wins?b.wins-a.wins:b.diff-a.diff);
+  return players.map(p=>{
+    const s=stats[p.id]||{wins:0,losses:0,pointsFor:0,pointsAgainst:0};
+    const gamesPlayed=s.wins+s.losses,diff=s.pointsFor-s.pointsAgainst;
+    return{...p,...s,gamesPlayed,diff,winPct:gamesPlayed?s.wins/gamesPlayed:0,avgDiff:gamesPlayed?diff/gamesPlayed:0};
+  })
+    // Ranked by win % and average point differential per game (not raw totals) so players
+    // who sat out more rounds — and so played fewer games — aren't penalized or boosted
+    // just for having a different number of games than everyone else.
+    .sort((a,b)=>b.winPct!==a.winPct?b.winPct-a.winPct:b.avgDiff-a.avgDiff);
 }
 
 function computePairStandings(rounds){
@@ -259,8 +266,13 @@ function computePairStandings(rounds){
       if(my>opp)pairMap[key].wins++;else pairMap[key].losses++;
     });
   }));
-  return Object.values(pairMap).map(p=>({...p,diff:p.pointsFor-p.pointsAgainst}))
-    .sort((a,b)=>b.wins!==a.wins?b.wins-a.wins:b.diff-a.diff);
+  return Object.values(pairMap).map(p=>{
+    const gamesPlayed=p.wins+p.losses,diff=p.pointsFor-p.pointsAgainst;
+    return{...p,gamesPlayed,diff,winPct:gamesPlayed?p.wins/gamesPlayed:0,avgDiff:gamesPlayed?diff/gamesPlayed:0};
+  })
+    // See computeStandings — ranked by rate, not raw totals, since teams don't always play
+    // the same number of games (e.g. one gets benched for a round due to a court limit).
+    .sort((a,b)=>b.winPct!==a.winPct?b.winPct-a.winPct:b.avgDiff-a.avgDiff);
 }
 
 // ─── Bracket ──────────────────────────────────────────────────────────────────
@@ -969,7 +981,7 @@ export default function FrogTournament(){
     return(
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
         <thead>
-          <tr>{[showQualify?"":"#",mode==="fixed"?"Team":"Player","W","L","PF","PA","+/-",showQualify?"✓":null].filter(Boolean).map((h,i)=>(
+          <tr>{[showQualify?"":"#",mode==="fixed"?"Team":"Player","GP","W","L","Win%","PF","PA","Avg +/-",showQualify?"✓":null].filter(Boolean).map((h,i)=>(
             <th key={i} style={{...S.th,textAlign:i>1?"center":"left"}}>{h}</th>
           ))}</tr>
         </thead>
@@ -978,15 +990,18 @@ export default function FrogTournament(){
             const key=mode==="fixed"?entry.players.map(p=>p.id).join("-"):entry.id;
             const name=mode==="fixed"?entry.players.map(p=>p.name).join(" & "):entry.name;
             const qual=showQualify&&isQualified(entry);
+            const avgDiff=entry.avgDiff??0;
             return(
               <tr key={key} style={{background:qual?"#F0FAE8":"inherit"}}>
                 <td style={{...S.td(i),textAlign:"center",fontWeight:700}}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</td>
                 <td style={S.td(i)}>{name}{qual&&<span style={{...S.badge(C.lime,C.greenDark),marginLeft:6,fontSize:10}}>Advances</span>}</td>
+                <td style={{...S.td(i),textAlign:"center",color:C.gray}}>{entry.gamesPlayed??(entry.wins+entry.losses)}</td>
                 <td style={{...S.td(i),textAlign:"center"}}><span style={S.badge(C.greenMid)}>{entry.wins}</span></td>
                 <td style={{...S.td(i),textAlign:"center"}}><span style={S.badge(entry.losses>0?C.red:C.gray)}>{entry.losses}</span></td>
+                <td style={{...S.td(i),textAlign:"center",fontWeight:700}}>{Math.round((entry.winPct??0)*100)}%</td>
                 <td style={{...S.td(i),textAlign:"center"}}>{entry.pointsFor}</td>
                 <td style={{...S.td(i),textAlign:"center"}}>{entry.pointsAgainst}</td>
-                <td style={{...S.td(i),textAlign:"center",fontWeight:700,color:entry.diff>=0?C.greenMid:C.red}}>{entry.diff>=0?`+${entry.diff}`:entry.diff}</td>
+                <td style={{...S.td(i),textAlign:"center",fontWeight:700,color:avgDiff>=0?C.greenMid:C.red}}>{avgDiff>=0?"+":""}{avgDiff.toFixed(1)}</td>
                 {showQualify&&(
                   <td style={{...S.td(i),textAlign:"center"}}>
                     <input type="checkbox" checked={qual} onChange={e=>toggleQualifier(entry,e.target.checked)}/>
@@ -1576,7 +1591,7 @@ export default function FrogTournament(){
               // Normal standings
               <div>
                 <div style={S.card}>
-                  <div style={S.sectionTitle}>📊 Standings <span style={{fontSize:12,color:C.gray,fontWeight:400}}>Wins → point differential</span></div>
+                  <div style={S.sectionTitle}>📊 Standings <span style={{fontSize:12,color:C.gray,fontWeight:400}}>Win % → avg point differential per game</span></div>
                   <div style={{overflowX:"auto"}}>
                     <StandingsTable entries={standings} mode={rrMode} showQualify={false} poolIdx={null}/>
                   </div>
