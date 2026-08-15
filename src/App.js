@@ -75,24 +75,29 @@ function circleMethodRounds(slots){
 // leftover, and on top of that a court limit can force more out if there isn't a court for
 // every possible match. Ranks teams by (worst member's bye count, then total bye count) so
 // whoever hasn't sat out yet gets benched before anyone sits out a second time.
-function pickBenchTeams(teams,byeCounts,matchLimit){
+// Fairness clock shared across a whole schedule generation: lastUsed[id] holds the "tick"
+// at which that player last sat out (0 = never). Always benching whoever has the lowest
+// tick — rather than a raw count with a random tie-break — means ties go to whoever's gone
+// longest without a bye, so bad luck can't let the same person get picked again and again.
+function bumpLastUsed(lastUsed,ids){
+  const tick=(lastUsed.__tick=(lastUsed.__tick||0)+1);
+  ids.forEach(id=>{if(id!=null)lastUsed[id]=tick;});
+}
+
+function pickBenchTeams(teams,lastUsed,matchLimit){
   const matchesPossible=Math.floor(teams.length/2);
   const matchesAllowed=Math.min(matchesPossible,matchLimit??Infinity);
   const benchCount=teams.length-matchesAllowed*2;
   if(benchCount<=0)return{teams,benched:[]};
-  const scored=teams.map(t=>{
-    const counts=t.map(p=>byeCounts[p?.id]||0);
-    return{t,score:[Math.max(...counts),counts.reduce((a,b)=>a+b,0)]};
-  });
-  for(let i=scored.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[scored[i],scored[j]]=[scored[j],scored[i]];}
-  scored.sort((a,b)=>a.score[0]-b.score[0]||a.score[1]-b.score[1]);
+  const scored=teams.map(t=>({t,score:Math.min(...t.map(p=>lastUsed[p?.id]||0))}));
+  scored.sort((a,b)=>a.score-b.score);
   const benched=scored.slice(0,benchCount).map(s=>s.t),benchedSet=new Set(benched);
+  bumpLastUsed(lastUsed,benched.flatMap(t=>t.filter(Boolean).map(p=>p.id)));
   return{teams:teams.filter(t=>!benchedSet.has(t)),benched};
 }
 
-function pairsToDoubles(roundPairs,byeCounts,matchLimit){
-  const{teams,benched}=pickBenchTeams(roundPairs,byeCounts||{},matchLimit);
-  benched.forEach(t=>t.forEach(p=>{if(p&&byeCounts)byeCounts[p.id]=(byeCounts[p.id]||0)+1;}));
+function pairsToDoubles(roundPairs,lastUsed,matchLimit){
+  const{teams}=pickBenchTeams(roundPairs,lastUsed||{},matchLimit);
   const matches=[],shuffled=shuffle(teams);
   for(let i=0;i+1<shuffled.length;i+=2)matches.push({team1:shuffled[i],team2:shuffled[i+1],score1:"",score2:""});
   return matches;
@@ -105,7 +110,7 @@ function buildRRSchedule(slots,numRounds,firstRoundByeIds,matchLimit){
   const shuffled=shuffle(slots);
   const unique=circleMethodRounds(shuffled);
   if(unique.length===0)return[];
-  const byeCounts={};
+  const lastUsed={};
   // Whoever's picked for the Round 1 bye is simply left out of that round's partner
   // pairing entirely (rather than needing to land on the same benched team), so this
   // works no matter how many people end up sitting out.
@@ -116,10 +121,45 @@ function buildRRSchedule(slots,numRounds,firstRoundByeIds,matchLimit){
     const active=shuffled.filter(p=>!forcedSet.has(p.id));
     const activeUnique=circleMethodRounds(active);
     round0Teams=activeUnique.length>0?activeUnique[0]:[];
-    forcedSet.forEach(id=>{byeCounts[id]=(byeCounts[id]||0)+1;});
+    bumpLastUsed(lastUsed,forced);
   }
-  const rounds=[pairsToDoubles(round0Teams,byeCounts,matchLimit)];
-  for(let r=1;r<numRounds;r++)rounds.push(pairsToDoubles(unique[r%unique.length],byeCounts,matchLimit));
+  const rounds=[pairsToDoubles(round0Teams,lastUsed,matchLimit)];
+  for(let r=1;r<numRounds;r++)rounds.push(pairsToDoubles(unique[r%unique.length],lastUsed,matchLimit));
+  return rounds;
+}
+
+// Rotating RR, free (unpinned) individuals: deterministically rotates who sits out each
+// round through a fair-queue rather than re-deciding it fresh each round, so — no matter
+// how many rounds are generated or how tight the court limit is — nobody sits out twice
+// before everyone else has at least once (previously a greedy per-round choice could let
+// the same person get unlucky several times in a row).
+function generateFreeRotatingSchedule(free,numRounds,firstRoundByeIds,matchLimit){
+  const teamCount=Math.floor(free.length/2);
+  const matchesAllowed=Math.min(Math.floor(teamCount/2),matchLimit??Infinity);
+  const sitOutCount=Math.max(0,free.length-matchesAllowed*4);
+  let queue=shuffle(free).map(p=>p.id);
+  const byId={};free.forEach(p=>{byId[p.id]=p;});
+  const rounds=[];
+  for(let r=0;r<numRounds;r++){
+    let sitOutIds;
+    if(r===0&&firstRoundByeIds&&firstRoundByeIds.length){
+      const forced=firstRoundByeIds.filter(id=>byId[id]);
+      const rest=queue.filter(id=>!forced.includes(id));
+      sitOutIds=[...forced,...rest.slice(0,Math.max(0,sitOutCount-forced.length))];
+    } else {
+      sitOutIds=queue.slice(0,sitOutCount);
+    }
+    const sitOutSet=new Set(sitOutIds);
+    // Move everyone who sat out to the back of the queue (least eligible to sit again
+    // next), keeping everyone else's relative order — a plain FIFO rotation.
+    queue=[...queue.filter(id=>!sitOutSet.has(id)),...sitOutIds];
+    const active=shuffle(free.filter(p=>!sitOutSet.has(p.id)));
+    const teams=[];
+    for(let i=0;i+1<active.length;i+=2)teams.push([active[i],active[i+1]]);
+    const shuffledTeams=shuffle(teams),matches=[];
+    for(let i=0;i+1<shuffledTeams.length;i+=2)matches.push({team1:shuffledTeams[i],team2:shuffledTeams[i+1],score1:"",score2:""});
+    rounds.push(matches);
+  }
   return rounds;
 }
 
@@ -137,27 +177,27 @@ function generateFixedRoundRobin(players,numRounds,matchLimit){
     for(let i=0;i<half;i++){const t1=circle[i],t2=circle[n-1-i];if(t1&&t2)round.push({team1:t1,team2:t2,score1:"",score2:""});}
     uniqueRounds.push(round);rotating.unshift(rotating.pop());
   }
-  const byeCounts={};
+  const lastUsed={};
   return Array.from({length:numRounds},(_,r)=>{
     const round=uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[];
-    return capMatchesToCourts(round,byeCounts,matchLimit);
+    return capMatchesToCourts(round,lastUsed,matchLimit);
   });
 }
 
 // Drops the lowest-court-priority matches when there are more matches than available courts,
 // preferring to keep matches whose teams have already sat out before (so the ones who haven't
 // sat out yet get the court this round).
-function capMatchesToCourts(matches,byeCounts,matchLimit){
+function capMatchesToCourts(matches,lastUsed,matchLimit){
   const limit=matchLimit??Infinity;
   if(matches.length<=limit)return matches;
   const scored=matches.map(m=>{
-    const counts=[...(m.team1||[]),...(m.team2||[])].filter(Boolean).map(p=>byeCounts[p.id]||0);
-    return{m,score:[Math.max(...counts,0),counts.reduce((a,b)=>a+b,0)]};
+    const ids=[...(m.team1||[]),...(m.team2||[])].filter(Boolean).map(p=>p.id);
+    return{m,score:ids.length?Math.min(...ids.map(id=>lastUsed[id]||0)):0};
   });
-  for(let i=scored.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[scored[i],scored[j]]=[scored[j],scored[i]];}
-  scored.sort((a,b)=>a.score[0]-b.score[0]||a.score[1]-b.score[1]);
+  scored.sort((a,b)=>a.score-b.score);
   const benchCount=matches.length-limit;
-  scored.slice(0,benchCount).forEach(({m})=>{[...(m.team1||[]),...(m.team2||[])].filter(Boolean).forEach(p=>{byeCounts[p.id]=(byeCounts[p.id]||0)+1;});});
+  const benchedIds=scored.slice(0,benchCount).flatMap(({m})=>[...(m.team1||[]),...(m.team2||[])].filter(Boolean).map(p=>p.id));
+  bumpLastUsed(lastUsed,benchedIds);
   return scored.slice(benchCount).map(s=>s.m);
 }
 
@@ -165,12 +205,16 @@ function capMatchesToCourts(matches,byeCounts,matchLimit){
 function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimit){
   const{pinnedPairs,free}=extractPinnedPairs(players);
   if(free.length===0)return buildRRSchedule(pinnedPairs,numRounds,null,matchLimit);
+  if(pinnedPairs.length===0)return generateFreeRotatingSchedule(free,numRounds,firstRoundByeIds,matchLimit);
+  // Pinned partners mixed with free players is a rarer case — build the free players' own
+  // schedule uncapped, then combine with the pinned teams and apply the real court limit
+  // (if any) across everyone together.
   const freeRounds=buildRRSchedule(free,numRounds,firstRoundByeIds,Infinity);
-  const byeCounts={};
+  const lastUsed={};
   return freeRounds.map(roundMatches=>{
     const allTeams=[...pinnedPairs];
     roundMatches.forEach(m=>{allTeams.push(m.team1);allTeams.push(m.team2);});
-    return pairsToDoubles(allTeams,byeCounts,matchLimit);
+    return pairsToDoubles(allTeams,lastUsed,matchLimit);
   });
 }
 
