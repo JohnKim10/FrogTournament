@@ -1,4 +1,30 @@
 import { useState, useMemo, useRef, useEffect } from "react";
+import { db } from "./firebase";
+import { doc, setDoc, onSnapshot, deleteDoc } from "firebase/firestore";
+
+function makeLiveCode(){
+  const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I to avoid ambiguity
+  let s="";
+  for(let i=0;i<6;i++)s+=chars[Math.floor(Math.random()*chars.length)];
+  return s;
+}
+
+// Firestore rejects arrays nested directly inside other arrays (this app's schedules are
+// exactly that: rounds is an array of matches-arrays). These wrap/unwrap a directly-nested
+// array as {__arr:[...]} on the way out and back, leaving the app's own state shape alone.
+function fsSanitize(value){
+  if(Array.isArray(value))return value.map(v=>{const sv=fsSanitize(v);return Array.isArray(sv)?{__arr:sv}:sv;});
+  if(value&&typeof value==="object"){const out={};for(const k in value)out[k]=fsSanitize(value[k]);return out;}
+  return value;
+}
+function fsUnsanitize(value){
+  if(Array.isArray(value))return value.map(fsUnsanitize);
+  if(value&&typeof value==="object"){
+    if("__arr"in value&&Object.keys(value).length===1)return fsUnsanitize(value.__arr);
+    const out={};for(const k in value)out[k]=fsUnsanitize(value[k]);return out;
+  }
+  return value;
+}
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 const C = {
@@ -372,15 +398,15 @@ function getPoolUnits(units, assignments, poolIdx) {
 }
 
 // ─── RR Team Block ────────────────────────────────────────────────────────────
-function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,roundPlayerIds,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx}){
+function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,roundPlayerIds,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx,readOnly}){
   if(!team||team.length===0)return<div style={{flex:1}}/>;
   const alignRight=side==="team1";
   return(
     <div style={{flex:1,textAlign:alignRight?"right":"left"}}>
       {team.filter(Boolean).map((p,pi)=>{
         if(!p)return null;
-        const isEditing=rrEditingName?.playerId===p.id;
-        const isSwapping=swapTarget?.rIdx===rIdx&&swapTarget?.mIdx===mIdx&&swapTarget?.poolIdx===poolIdx&&swapTarget?.side===side&&swapTarget?.playerId===p.id;
+        const isEditing=!readOnly&&rrEditingName?.playerId===p.id;
+        const isSwapping=!readOnly&&swapTarget?.rIdx===rIdx&&swapTarget?.mIdx===mIdx&&swapTarget?.poolIdx===poolIdx&&swapTarget?.side===side&&swapTarget?.playerId===p.id;
         // Only players not already playing elsewhere this round can be swapped in, so a swap can
         // never create a duplicate (the same player appearing in two spots in one round).
         const available=players.filter(pl=>!roundPlayerIds.has(pl.id));
@@ -396,11 +422,11 @@ function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingNam
                   onBlur={()=>saveRrName(p.id,rrEditingName.value)}
                   onClick={e=>e.stopPropagation()}/>
               ):(
-                <span title="Click to edit name"
-                  style={{fontWeight:700,fontSize:17,cursor:"text",color:isWinner?C.greenDark:hasWinner?C.gray:C.greenDark,borderBottom:`1px dashed ${C.grayLight}`,paddingBottom:1}}
-                  onClick={()=>setRrEditingName({playerId:p.id,value:p.name})}>{p.name}</span>
+                <span title={readOnly?undefined:"Click to edit name"}
+                  style={{fontWeight:700,fontSize:17,cursor:readOnly?"default":"text",color:isWinner?C.greenDark:hasWinner?C.gray:C.greenDark,borderBottom:readOnly?"none":`1px dashed ${C.grayLight}`,paddingBottom:1}}
+                  onClick={readOnly?undefined:()=>setRrEditingName({playerId:p.id,value:p.name})}>{p.name}</span>
               )}
-              {!isEditing&&<span title="Swap this player" style={{cursor:"pointer",fontSize:11,color:C.gray,padding:"0 2px",userSelect:"none"}}
+              {!isEditing&&!readOnly&&<span title="Swap this player" style={{cursor:"pointer",fontSize:11,color:C.gray,padding:"0 2px",userSelect:"none"}}
                 onClick={e=>{e.stopPropagation();setSwapTarget(isSwapping?null:{rIdx,mIdx,poolIdx,playerId:p.id,side});}}>⇅</span>}
             </span>
             {isSwapping&&available.length>0&&(
@@ -425,7 +451,12 @@ const TABS_POOL=["Players","Pool Setup","Pool Play","Pool Standings","Playoffs"]
 export default function FrogTournament(){
   const STORAGE_KEY="frog-tournament-state-v2";
 
-  function loadState(){try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}return null;}
+  // A "?view=CODE" URL opens the app in read-only viewer mode, live-synced from Firestore
+  // instead of this browser's own local storage.
+  const [viewCode]=useState(()=>{try{return new URLSearchParams(window.location.search).get("view")?.trim().toUpperCase()||null;}catch(e){return null;}});
+  const readOnly=!!viewCode;
+
+  function loadState(){if(readOnly)return null;try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}return null;}
   const saved=loadState();
 
   const [tab,setTab]=useState(0);
@@ -470,19 +501,68 @@ export default function FrogTournament(){
   const [numCourts,setNumCourts]=useState(saved?.numCourts??4);
   const [customCourtLabels,setCustomCourtLabels]=useState(saved?.customCourtLabels??"");
   const [showSaveModal,setShowSaveModal]=useState(false);
+  const [showLiveModal,setShowLiveModal]=useState(false);
+  const [linkCopied,setLinkCopied]=useState(false);
   const [saveFileName,setSaveFileName]=useState("");
   const [toast,setToast]=useState("");
   const importFileRef=useRef(null);
+  const [liveCode,setLiveCode]=useState(saved?.liveCode??null);
+  const [liveStatus,setLiveStatus]=useState("idle"); // idle | connecting | live | error
+  const [viewStatus,setViewStatus]=useState(readOnly?"connecting":"idle"); // connecting | live | notfound
+  const [viewMeta,setViewMeta]=useState(null); // {updatedAt}
 
   function currentStateSnapshot(){
     return{players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels};
   }
 
-  // Persist
+  // Persist (skipped in read-only viewer mode — that browser is just watching someone
+  // else's tournament, it shouldn't overwrite whatever local tournament it had, if any)
   useEffect(()=>{
-    try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels}));}
+    if(readOnly)return;
+    try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels,liveCode}));}
     catch(e){}
-  },[players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
+  },[readOnly,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels,liveCode]);
+
+  // Live sharing: while liveCode is set, push the current tournament state to Firestore
+  // (debounced) so anyone with the view link sees it update in near real time.
+  useEffect(()=>{
+    if(readOnly||!liveCode)return;
+    setLiveStatus("connecting");
+    const snapshot=currentStateSnapshot();
+    const clean=fsSanitize(JSON.parse(JSON.stringify(snapshot))); // Firestore rejects `undefined` fields and nested arrays
+    const t=setTimeout(()=>{
+      setDoc(doc(db,"tournaments",liveCode),{state:clean,updatedAt:Date.now()},{merge:false})
+        .then(()=>setLiveStatus("live"))
+        .catch(()=>setLiveStatus("error"));
+    },600);
+    return()=>clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[readOnly,liveCode,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
+
+  function goLive(){
+    setLiveCode(prev=>prev||makeLiveCode());
+  }
+  function stopLive(){
+    if(liveCode)deleteDoc(doc(db,"tournaments",liveCode)).catch(()=>{});
+    setLiveCode(null);
+    setLiveStatus("idle");
+  }
+
+  // Viewer mode: subscribe to the live tournament and apply every update as it arrives.
+  const viewerFirstLoad=useRef(true);
+  useEffect(()=>{
+    if(!viewCode)return;
+    const unsub=onSnapshot(doc(db,"tournaments",viewCode),snap=>{
+      if(!snap.exists()){setViewStatus("notfound");return;}
+      const data=snap.data();
+      applyState(fsUnsanitize(data.state||{}),{resetNav:viewerFirstLoad.current});
+      viewerFirstLoad.current=false;
+      setViewMeta({updatedAt:data.updatedAt});
+      setViewStatus("live");
+    },()=>setViewStatus("notfound"));
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[viewCode]);
 
   useEffect(()=>{
     if(!toast)return;
@@ -503,34 +583,39 @@ export default function FrogTournament(){
     setToast(`Saved "${name||safeName}"`);
   }
 
+  // Applies a full saved/synced state object to all the relevant setters — shared by
+  // file import and the live Firestore viewer subscription. `resetNav` (skipped for live
+  // updates so a viewer's current tab doesn't keep jumping around as the host makes changes).
+  function applyState(s,{resetNav=true}={}){
+    setPlayers(s.players??[]);
+    setRrMode(s.rrMode??"rotating");
+    setRrNumRounds(s.rrNumRounds??3);
+    setRrRounds(s.rrRounds??[]);
+    setNumPlayoffBrackets(s.numPlayoffBrackets??1);
+    setBracketAssignmentOverrides(s.bracketAssignmentOverrides??{});
+    setPlayoffBrackets(s.playoffBrackets??(s.bracketRounds?.length?[{id:1,name:"Playoffs",numRounds:s.bracketRounds.length,entryKeys:[],rounds:s.bracketRounds}]:[]));
+    setNextBracketId(s.nextBracketId??2);
+    setNextId(s.nextId??1);
+    setPoolPlay(s.poolPlay??false);
+    setNumPools(s.numPools??2);
+    setPoolAssignments(s.poolAssignments??{});
+    setPoolRounds(s.poolRounds??{});
+    setAdvanceCount(s.advanceCount??2);
+    setPlayoffPairingMode(s.playoffPairingMode??"best-worst");
+    setPoolQualifierOverrides(s.poolQualifierOverrides??{});
+    setCourtsEnabled(s.courtsEnabled??false);
+    setNumCourts(s.numCourts??4);
+    setCustomCourtLabels(s.customCourtLabels??"");
+    if(resetNav){setActiveBracketIdx(0);setConfiguringPlayoffs(false);setTab(0);}
+  }
+
   function importSave(file){
     const reader=new FileReader();
     reader.onload=()=>{
       try{
         const parsed=JSON.parse(reader.result);
         const s=parsed?.state??parsed; // support raw state or wrapped save file
-        setPlayers(s.players??[]);
-        setRrMode(s.rrMode??"rotating");
-        setRrNumRounds(s.rrNumRounds??3);
-        setRrRounds(s.rrRounds??[]);
-        setNumPlayoffBrackets(s.numPlayoffBrackets??1);
-        setBracketAssignmentOverrides(s.bracketAssignmentOverrides??{});
-        setPlayoffBrackets(s.playoffBrackets??(s.bracketRounds?.length?[{id:1,name:"Playoffs",numRounds:s.bracketRounds.length,entryKeys:[],rounds:s.bracketRounds}]:[]));
-        setNextBracketId(s.nextBracketId??2);
-        setActiveBracketIdx(0);
-        setConfiguringPlayoffs(false);
-        setNextId(s.nextId??1);
-        setPoolPlay(s.poolPlay??false);
-        setNumPools(s.numPools??2);
-        setPoolAssignments(s.poolAssignments??{});
-        setPoolRounds(s.poolRounds??{});
-        setAdvanceCount(s.advanceCount??2);
-        setPlayoffPairingMode(s.playoffPairingMode??"best-worst");
-        setPoolQualifierOverrides(s.poolQualifierOverrides??{});
-        setCourtsEnabled(s.courtsEnabled??false);
-        setNumCourts(s.numCourts??4);
-        setCustomCourtLabels(s.customCourtLabels??"");
-        setTab(0);
+        applyState(s);
         setToast(parsed?.name?`Loaded "${parsed.name}"`:"Loaded save file");
       }catch(e){
         setToast("Couldn't read that file — is it a valid save?");
@@ -1004,7 +1089,7 @@ export default function FrogTournament(){
                 <td style={{...S.td(i),textAlign:"center",fontWeight:700,color:avgDiff>=0?C.greenMid:C.red}}>{avgDiff>=0?"+":""}{avgDiff.toFixed(1)}</td>
                 {showQualify&&(
                   <td style={{...S.td(i),textAlign:"center"}}>
-                    <input type="checkbox" checked={qual} onChange={e=>toggleQualifier(entry,e.target.checked)}/>
+                    <input type="checkbox" checked={qual} disabled={readOnly} onChange={e=>toggleQualifier(entry,e.target.checked)}/>
                   </td>
                 )}
               </tr>
@@ -1055,10 +1140,14 @@ export default function FrogTournament(){
                     <div key={match.id||mIdx} style={{position:"absolute",left:colLeft,top:t,width:COL_W,background:champ?`linear-gradient(135deg,${C.greenDark},${C.green})`:C.white,borderRadius:10,boxShadow:champ?"0 0 16px rgba(126,200,80,0.35)":"0 2px 8px rgba(0,0,0,0.13)",border:champ?`2px solid ${C.lime}`:`1.5px solid ${C.grayLight}`,overflow:"hidden"}}>
                       {courtsEnabled&&courtLabels.length>0&&!(t1b&&t2b)&&(
                         <div style={{padding:"5px 12px 0"}}>
-                          <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateBracketScore(bracket.id,rIdx,mIdx,"court",e.target.value)}
-                            style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
-                            {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
-                          </select>
+                          {readOnly?(
+                            <span style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10}}>🎾 Court {match.court??courtLabels[mIdx%courtLabels.length]}</span>
+                          ):(
+                            <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateBracketScore(bracket.id,rIdx,mIdx,"court",e.target.value)}
+                              style={{...S.badge(champ?"rgba(255,255,255,0.15)":C.grayLight,champ?C.limeLight:C.greenDark),fontSize:10,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
+                              {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
+                            </select>
+                          )}
                         </div>
                       )}
                       {rows.map(({side,team,sf,seed},si)=>{
@@ -1086,16 +1175,20 @@ export default function FrogTournament(){
                                   return(
                                     <span key={p?.id??pi} style={{display:"inline-flex",alignItems:"center",gap:3}}>
                                       {pi>0&&<span style={{fontWeight:400,color:C.gray}}> & </span>}{p?.name??"?"}
-                                      {rIdx===0&&!isFixedMode&&<span title="Swap this player" style={{cursor:"pointer",fontSize:11,color:champ?C.limeLight:C.gray,padding:"0 2px",userSelect:"none"}}
+                                      {rIdx===0&&!isFixedMode&&!readOnly&&<span title="Swap this player" style={{cursor:"pointer",fontSize:11,color:champ?C.limeLight:C.gray,padding:"0 2px",userSelect:"none"}}
                                         onClick={()=>setBracketSwapTarget(isPlayerSwapping?null:{bracketId:bracket.id,mIdx,side,playerId:p.id})}>⇅</span>}
                                     </span>
                                   );
                                 })}
                               </span>
-                              {rIdx===0&&isFixedMode&&!bye&&<span title="Swap this team" style={{cursor:"pointer",fontSize:11,color:champ?C.limeLight:C.gray,padding:"0 2px",userSelect:"none",flexShrink:0}}
+                              {rIdx===0&&isFixedMode&&!bye&&!readOnly&&<span title="Swap this team" style={{cursor:"pointer",fontSize:11,color:champ?C.limeLight:C.gray,padding:"0 2px",userSelect:"none",flexShrink:0}}
                                 onClick={()=>setBracketSwapTarget(teamSwapping?null:{bracketId:bracket.id,mIdx,side,playerId:null})}>⇅</span>}
                               {win&&!bye&&<span style={{fontSize:champ?15:12,flexShrink:0}}>{champ?"🏆":"✓"}</span>}
-                              {bothReal&&!bye&&<input type="number" min="0" key={match.id+sf} style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,fontFamily:"inherit",color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,outline:"none",flexShrink:0}} defaultValue={match[sf]} onBlur={e=>updateBracketScore(bracket.id,rIdx,mIdx,sf,e.target.value)} placeholder="—"/>}
+                              {bothReal&&!bye&&(readOnly?(
+                                <span style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,flexShrink:0,display:"inline-block"}}>{match[sf]||"—"}</span>
+                              ):(
+                                <input type="number" min="0" key={match.id+sf} style={{border:`1.5px solid ${win?C.lime:C.grayLight}`,borderRadius:6,padding:"5px 0",width:42,textAlign:"center",fontWeight:700,fontSize:15,fontFamily:"inherit",color:win?C.greenDark:C.charcoal,background:win?"#E8F8E0":C.white,outline:"none",flexShrink:0}} defaultValue={match[sf]} onBlur={e=>updateBracketScore(bracket.id,rIdx,mIdx,sf,e.target.value)} placeholder="—"/>
+                              ))}
                             </div>
                             {teamSwapping&&(
                               <div style={{padding:"0 12px 10px",background:bg}}>
@@ -1175,20 +1268,34 @@ export default function FrogTournament(){
                   <div key={mIdx}>
                     {courtsEnabled&&courtLabels.length>0&&(
                       <div style={{marginBottom:4}}>
-                        <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateScore(rIdx,mIdx,"court",e.target.value)}
-                          style={{...S.badge(C.grayLight,C.greenDark),fontSize:11,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
-                          {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
-                        </select>
+                        {readOnly?(
+                          <span style={{...S.badge(C.grayLight,C.greenDark),fontSize:11}}>🎾 Court {match.court??courtLabels[mIdx%courtLabels.length]}</span>
+                        ):(
+                          <select value={match.court??courtLabels[mIdx%courtLabels.length]} onChange={e=>updateScore(rIdx,mIdx,"court",e.target.value)}
+                            style={{...S.badge(C.grayLight,C.greenDark),fontSize:11,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:700,paddingRight:6}}>
+                            {courtLabels.map(c=><option key={c} value={c}>🎾 Court {c}</option>)}
+                          </select>
+                        )}
                       </div>
                     )}
                     <div style={S.matchCard}>
-                      <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
+                      <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
                       <div style={{display:"flex",alignItems:"center",gap:6}}>
-                        <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
-                        <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
-                        <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
+                        {readOnly?(
+                          <>
+                            <span style={S.scoreInput}>{match.score1||"—"}</span>
+                            <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
+                            <span style={S.scoreInput}>{match.score2||"—"}</span>
+                          </>
+                        ):(
+                          <>
+                            <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s1`} defaultValue={match.score1} onBlur={e=>updateScore(rIdx,mIdx,"score1",e.target.value)} placeholder="—"/>
+                            <span style={{fontWeight:900,color:C.gray,fontSize:16}}>vs</span>
+                            <input type="number" min="0" style={S.scoreInput} key={`r${rIdx}m${mIdx}s2`} defaultValue={match.score2} onBlur={e=>updateScore(rIdx,mIdx,"score2",e.target.value)} placeholder="—"/>
+                          </>
+                        )}
                       </div>
-                      <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx}/>
+                      <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
                     </div>
                   </div>
                 );
@@ -1232,12 +1339,64 @@ export default function FrogTournament(){
           {pinnedPairs.length>0&&<span style={{...S.badge(C.amber),fontSize:13}}>{pinnedPairs.length} Pairs</span>}
           {!poolPlay&&rrRounds.length>0&&<span style={{...S.badge(C.blue),fontSize:13}}>{rrRounds.length} Games/Player</span>}
           {playoffBrackets.length>0&&<span style={{...S.badge(C.green),fontSize:13}}>{playoffBrackets.length} Playoff Bracket{playoffBrackets.length!==1?"s":""}</span>}
-          <button style={S.smallBtn("green")} onClick={()=>{setSaveFileName("");setShowSaveModal(true);}}>💾 Save</button>
-          <button style={S.smallBtn("ghost")} onClick={()=>importFileRef.current?.click()}>📂 Import</button>
-          <input ref={importFileRef} type="file" accept="application/json,.json" style={{display:"none"}}
-            onChange={e=>{const f=e.target.files?.[0];if(f)importSave(f);e.target.value="";}}/>
+          {readOnly?(
+            <span style={{...S.badge(viewStatus==="live"?C.red:C.gray),fontSize:13,display:"flex",alignItems:"center",gap:6}}>
+              {viewStatus==="live"&&<span style={{width:7,height:7,borderRadius:"50%",background:C.white,display:"inline-block"}}/>}
+              {viewStatus==="connecting"?"Connecting…":viewStatus==="notfound"?"Tournament not found":"Live view"}
+            </span>
+          ):(
+            <>
+              {liveCode?(
+                <button style={{...S.smallBtn(liveStatus==="error"?"red":"green")}} onClick={()=>setShowLiveModal(true)}>
+                  {liveStatus==="live"?"🔴 Live":liveStatus==="error"?"⚠️ Sync error":"🔴 Going live…"}
+                </button>
+              ):(
+                <button style={S.smallBtn("blue")} onClick={()=>{goLive();setShowLiveModal(true);}}>📡 Go Live</button>
+              )}
+              <button style={S.smallBtn("green")} onClick={()=>{setSaveFileName("");setShowSaveModal(true);}}>💾 Save</button>
+              <button style={S.smallBtn("ghost")} onClick={()=>importFileRef.current?.click()}>📂 Import</button>
+              <input ref={importFileRef} type="file" accept="application/json,.json" style={{display:"none"}}
+                onChange={e=>{const f=e.target.files?.[0];if(f)importSave(f);e.target.value="";}}/>
+            </>
+          )}
         </div>
       </div>
+
+      {readOnly&&(
+        <div style={{background:C.amber,color:C.white,textAlign:"center",padding:"8px 16px",fontWeight:700,fontSize:13}}>
+          👁️ You're viewing a live tournament — read-only. Changes made by the host will appear automatically.
+          {viewMeta?.updatedAt&&<span style={{fontWeight:500,opacity:0.85}}> · Updated {new Date(viewMeta.updatedAt).toLocaleTimeString()}</span>}
+        </div>
+      )}
+
+      {showLiveModal&&!readOnly&&(
+        <div style={S.overlay} onClick={()=>setShowLiveModal(false)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <div style={{fontWeight:800,fontSize:16,color:C.greenDark,marginBottom:6}}>📡 Live tournament</div>
+            <div style={{fontSize:13,color:C.gray,marginBottom:16}}>
+              Anyone with this link can watch scores and standings update live, in real time, from any device — they can't edit anything.
+            </div>
+            {(() => {
+              const link=`${window.location.origin}${window.location.pathname}?view=${liveCode}`;
+              return(
+                <>
+                  <div style={{display:"flex",gap:8,marginBottom:8}}>
+                    <input readOnly style={{...S.input,flex:1,boxSizing:"border-box",fontSize:13}} value={link} onFocus={e=>e.target.select()}/>
+                    <button style={S.smallBtn("blue")} onClick={()=>{
+                      navigator.clipboard?.writeText(link).then(()=>{setLinkCopied(true);setTimeout(()=>setLinkCopied(false),2000);});
+                    }}>{linkCopied?"Copied!":"Copy"}</button>
+                  </div>
+                  <div style={{fontSize:12,color:C.gray,marginBottom:16}}>
+                    Status: {liveStatus==="live"?"🟢 Live and syncing":liveStatus==="error"?"⚠️ Couldn't sync — check your connection":"Connecting…"}
+                  </div>
+                </>
+              );
+            })()}
+            <button style={{...S.smallBtn("red"),width:"100%"}} onClick={()=>{stopLive();setShowLiveModal(false);}}>Stop Sharing</button>
+            <button style={{...S.smallBtn("ghost"),marginTop:8,width:"100%",background:C.grayLight}} onClick={()=>setShowLiveModal(false)}>Close</button>
+          </div>
+        </div>
+      )}
 
       {toast&&(
         <div style={{position:"fixed",bottom:20,right:20,zIndex:1200,background:C.greenDark,color:C.white,padding:"10px 18px",borderRadius:10,fontWeight:700,fontSize:14,boxShadow:"0 6px 24px rgba(0,0,0,0.25)"}}>
@@ -1270,7 +1429,7 @@ export default function FrogTournament(){
           <div>
             <div style={S.card}>
               <div style={S.sectionTitle}>🐸 Player Roster <span style={{...S.badge(C.greenMid),fontSize:11}}>{players.length} players</span>
-                {confirmingClear?(
+                {!readOnly&&(confirmingClear?(
                   <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
                     <span style={{fontSize:13,color:C.red,fontWeight:700}}>Clear everything?</span>
                     <button style={S.smallBtn("red")} onClick={clearAll}>Yes, clear</button>
@@ -1278,9 +1437,10 @@ export default function FrogTournament(){
                   </div>
                 ):(
                   <button style={{...S.smallBtn("red"),marginLeft:"auto",fontSize:13}} onClick={()=>setConfirmingClear(true)}>🗑 Clear All</button>
-                )}
+                ))}
               </div>
 
+              {!readOnly&&<>
               {/* Format toggle */}
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:13,fontWeight:700,color:C.greenDark,marginBottom:6}}>Tournament Format</div>
@@ -1384,6 +1544,7 @@ export default function FrogTournament(){
               )}
 
               {/* Playoff format is configured from the Playoffs tab once standings exist */}
+              </>}
 
               {/* Player list */}
               {players.map((p,idx)=>{
@@ -1392,7 +1553,7 @@ export default function FrogTournament(){
                   <div key={p.id} style={S.playerRow(!!p.pinnedPartnerId)}>
                     <span style={{fontSize:13,fontWeight:700,color:C.gray,minWidth:20}}>{idx+1}.</span>
                     <span style={{fontSize:18}}>{p.pinnedPartnerId?"📌":"👤"}</span>
-                    {editingPlayer?.id===p.id?(
+                    {!readOnly&&editingPlayer?.id===p.id?(
                       <>
                         <input style={{...S.input,flex:1,marginRight:6}} value={editingPlayer.name} onChange={e=>setEditingPlayer({...editingPlayer,name:e.target.value})} onKeyDown={e=>e.key==="Enter"&&saveEditPlayer(p.id,editingPlayer.name)} autoFocus/>
                         <button style={S.smallBtn("green")} onClick={()=>saveEditPlayer(p.id,editingPlayer.name)}>Save</button>
@@ -1405,16 +1566,18 @@ export default function FrogTournament(){
                           {partner&&<div style={{fontSize:11,color:C.greenMid,fontWeight:700}}>with {partner.name}</div>}
                           {poolPlay&&poolAssignments[unitKey(p)]!==undefined&&<span style={{...S.badge(C.poolColors[poolAssignments[unitKey(p)]%C.poolColors.length]),fontSize:10,marginTop:2}}>Pool {poolAssignments[unitKey(p)]+1}</span>}
                         </div>
-                        <button style={S.iconBtn(p.pinnedPartnerId?C.amber:C.gray)} onClick={()=>setPinningPlayerId(p.id)}>📌</button>
-                        <button style={S.iconBtn(C.greenMid)} onClick={()=>setEditingPlayer({id:p.id,name:p.name})}>✏️</button>
-                        <button style={S.iconBtn(C.red)} onClick={()=>removePlayer(p.id)}>✕</button>
+                        {!readOnly&&<>
+                          <button style={S.iconBtn(p.pinnedPartnerId?C.amber:C.gray)} onClick={()=>setPinningPlayerId(p.id)}>📌</button>
+                          <button style={S.iconBtn(C.greenMid)} onClick={()=>setEditingPlayer({id:p.id,name:p.name})}>✏️</button>
+                          <button style={S.iconBtn(C.red)} onClick={()=>removePlayer(p.id)}>✕</button>
+                        </>}
                       </>
                     )}
                   </div>
                 );
               })}
 
-              {addingPlayer?(
+              {!readOnly&&(addingPlayer?(
                 <div style={{display:"flex",gap:8,marginTop:10}}>
                   <input style={{...S.input,flex:1}} placeholder="Player name..." value={newPlayerName} onChange={e=>setNewPlayerName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPlayer()} autoFocus/>
                   <button style={S.smallBtn("green")} onClick={addPlayer}>Add</button>
@@ -1422,10 +1585,10 @@ export default function FrogTournament(){
                 </div>
               ):(
                 <button style={{...S.bigBtn("lime"),marginTop:10,fontSize:13}} onClick={()=>setAddingPlayer(true)}>+ Add Player</button>
-              )}
+              ))}
             </div>
 
-            <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+            {!readOnly&&<div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
               {poolPlay?(
                 <button style={S.bigBtn("blue")} onClick={()=>setTab(1)} disabled={players.length<4}>
                   Next: Set Up Pools →
@@ -1436,7 +1599,7 @@ export default function FrogTournament(){
                 </button>
               )}
               {players.length<4&&<span style={{color:C.limeLight,fontSize:13,alignSelf:"center"}}>Need at least 4 players</span>}
-            </div>
+            </div>}
           </div>
         )}
 
@@ -1449,10 +1612,10 @@ export default function FrogTournament(){
                 <span style={{...S.badge(C.greenMid),fontSize:11}}>{poolUnits.length} {rrMode==="fixed"?"teams":"players"}</span>
               </div>
 
-              <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+              {!readOnly&&<div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
                 <button style={S.bigBtn("lime")} onClick={autoAssignAllPools}>🎲 Auto-assign pools</button>
                 <button style={S.smallBtn("ghost")} onClick={()=>setPoolAssignments({})}>Reset assignments</button>
-              </div>
+              </div>}
 
               {/* Warnings */}
               {Array.from({length:numPools},(_,p)=>getPool(p)).some(pool=>pool.length<2)&&(
@@ -1483,7 +1646,7 @@ export default function FrogTournament(){
                             <span style={{flex:1,fontSize:13,fontWeight:inPool?700:500}}>{name}</span>
                             {inPool?(
                               <span style={{...S.badge(C.lime,C.greenDark),fontSize:10}}>✓ Here</span>
-                            ):(
+                            ):!readOnly&&(
                               <button style={S.smallBtn("green")} onClick={()=>setUnitPool(u,poolIdx)}>Move here</button>
                             )}
                           </div>
@@ -1495,9 +1658,9 @@ export default function FrogTournament(){
               </div>
             </div>
 
-            <button style={S.bigBtn("blue")} onClick={generatePoolPlay}>
+            {!readOnly&&<button style={S.bigBtn("blue")} onClick={generatePoolPlay}>
               🎲 Generate Pool Schedules →
-            </button>
+            </button>}
           </div>
         )}
 
@@ -1508,7 +1671,7 @@ export default function FrogTournament(){
               // Pool play mode — show each pool separately
               <>
                 <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
-                  <button style={S.bigBtn("lime")} onClick={generatePoolPlay}>🔀 Re-generate pools</button>
+                  {!readOnly&&<button style={S.bigBtn("lime")} onClick={generatePoolPlay}>🔀 Re-generate pools</button>}
                   <button style={S.bigBtn("blue")} onClick={()=>setTab(standingsTabIdx)}>📊 Pool Standings →</button>
                 </div>
                 {Array.from({length:numPools},(_,poolIdx)=>{
@@ -1542,7 +1705,7 @@ export default function FrogTournament(){
                 </div>
               ):(
                 <>
-                  <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+                  {!readOnly&&<div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
                     <button style={S.bigBtn("lime")} onClick={generateRR}>🔀 Re-randomize</button>
                     <button style={S.bigBtn("blue")} onClick={()=>{setConfiguringPlayoffs(true);setTab(playoffsTabIdx);}}>🏆 Set Up Playoffs →</button>
                     {addingPlayer?(
@@ -1554,7 +1717,7 @@ export default function FrogTournament(){
                     ):(
                       <button style={S.smallBtn("lime")} onClick={()=>setAddingPlayer(true)}>+ Add Player</button>
                     )}
-                  </div>
+                  </div>}
                   <RoundsList rounds={rrRounds} updateScore={updateRRScore}/>
                 </>
               )
@@ -1583,9 +1746,9 @@ export default function FrogTournament(){
                     </div>
                   );
                 })}
-                <div style={{display:"flex",gap:10,marginTop:4,flexWrap:"wrap"}}>
+                {!readOnly&&<div style={{display:"flex",gap:10,marginTop:4,flexWrap:"wrap"}}>
                   <button style={S.bigBtn("blue")} onClick={()=>{setConfiguringPlayoffs(true);setTab(playoffsTabIdx);}}>🏆 Set Up Playoffs →</button>
-                </div>
+                </div>}
               </>
             ):(
               // Normal standings
@@ -1596,7 +1759,7 @@ export default function FrogTournament(){
                     <StandingsTable entries={standings} mode={rrMode} showQualify={false} poolIdx={null}/>
                   </div>
                 </div>
-                <button style={S.bigBtn("blue")} onClick={()=>{setConfiguringPlayoffs(true);setTab(playoffsTabIdx);}}>🏆 Set Up Playoffs →</button>
+                {!readOnly&&<button style={S.bigBtn("blue")} onClick={()=>{setConfiguringPlayoffs(true);setTab(playoffsTabIdx);}}>🏆 Set Up Playoffs →</button>}
               </div>
             )}
           </div>
@@ -1613,6 +1776,15 @@ export default function FrogTournament(){
                 <div style={{fontWeight:700,color:C.greenDark,fontSize:16,marginBottom:6}}>Playoffs not started</div>
                 <div style={{color:C.gray,fontSize:14,marginBottom:16}}>Complete {poolPlay?"pool play":"round robin"} scores then set up the bracket from Standings.</div>
                 <button style={S.bigBtn("lime")} onClick={()=>{setConfiguringPlayoffs(false);setTab(standingsTabIdx);}}>← View Standings</button>
+              </div>
+            );
+          }
+          if(showSetup&&readOnly){
+            return(
+              <div style={{...S.card,textAlign:"center",padding:40}}>
+                <div style={{fontSize:40,marginBottom:10}}>🏆</div>
+                <div style={{fontWeight:700,color:C.greenDark,fontSize:16,marginBottom:6}}>Playoffs haven't started yet</div>
+                <div style={{color:C.gray,fontSize:14}}>The host hasn't set up the playoff bracket yet. Check back soon.</div>
               </div>
             );
           }
@@ -1718,17 +1890,19 @@ export default function FrogTournament(){
                       onKeyDown={e=>{if(e.key==="Enter"){renamePlayoffBracket(i,editingBracketName.value.trim()||b.name);setEditingBracketName(null);}if(e.key==="Escape")setEditingBracketName(null);}}
                       onBlur={()=>{renamePlayoffBracket(i,editingBracketName.value.trim()||b.name);setEditingBracketName(null);}}/>
                   ):(
-                    <button key={b.id} style={S.modeBtn(activeIdx===i)} onClick={()=>setActiveBracketIdx(i)} onDoubleClick={()=>setEditingBracketName({idx:i,value:b.name})}>{b.name}</button>
+                    <button key={b.id} style={S.modeBtn(activeIdx===i)} onClick={()=>setActiveBracketIdx(i)} onDoubleClick={readOnly?undefined:()=>setEditingBracketName({idx:i,value:b.name})}>{b.name}</button>
                   )
                 ))}
-                <button style={S.smallBtn("ghost")} onClick={()=>setEditingBracketName({idx:activeIdx,value:activeBracket.name})}>✏️ Rename</button>
-                <button style={S.smallBtn("ghost")} onClick={()=>setConfiguringPlayoffs(true)}>⚙️ Reconfigure</button>
+                {!readOnly&&<>
+                  <button style={S.smallBtn("ghost")} onClick={()=>setEditingBracketName({idx:activeIdx,value:activeBracket.name})}>✏️ Rename</button>
+                  <button style={S.smallBtn("ghost")} onClick={()=>setConfiguringPlayoffs(true)}>⚙️ Reconfigure</button>
+                </>}
               </div>
 
               <ChampBanner bracket={activeBracket}/>
               <div style={{...S.card,padding:"14px 18px",marginBottom:16}}>
                 <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
-                  <span style={{fontSize:13,color:C.gray}}>{activeBracket.rounds[0]?.length||0} match{activeBracket.rounds[0]?.length!==1?"es":""} in Round 1 · double-click a bracket's name above to rename it</span>
+                  <span style={{fontSize:13,color:C.gray}}>{activeBracket.rounds[0]?.length||0} match{activeBracket.rounds[0]?.length!==1?"es":""} in Round 1{!readOnly&&" · double-click a bracket's name above to rename it"}</span>
                   <button style={S.bigBtn("dark")} onClick={()=>setTab(standingsTabIdx)}>← Standings</button>
                 </div>
               </div>
