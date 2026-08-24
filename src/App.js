@@ -451,12 +451,13 @@ const TABS_POOL=["Players","Pool Setup","Pool Play","Pool Standings","Playoffs"]
 export default function FrogTournament(){
   const STORAGE_KEY="frog-tournament-state-v2";
 
-  // A "?view=CODE" URL opens the app in read-only viewer mode, live-synced from Firestore
-  // instead of this browser's own local storage.
+  // A "?view=CODE" URL opens the app live-synced from Firestore instead of this browser's
+  // own local storage. Whether that joined session can edit (vs. just watch) is controlled
+  // by the host, live, via the "editable" flag on the shared doc (see viewMeta below).
   const [viewCode]=useState(()=>{try{return new URLSearchParams(window.location.search).get("view")?.trim().toUpperCase()||null;}catch(e){return null;}});
-  const readOnly=!!viewCode;
+  const joined=!!viewCode;
 
-  function loadState(){if(readOnly)return null;try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}return null;}
+  function loadState(){if(joined)return null;try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}return null;}
   const saved=loadState();
 
   const [tab,setTab]=useState(0);
@@ -508,8 +509,13 @@ export default function FrogTournament(){
   const importFileRef=useRef(null);
   const [liveCode,setLiveCode]=useState(saved?.liveCode??null);
   const [liveStatus,setLiveStatus]=useState("idle"); // idle | connecting | live | error
-  const [viewStatus,setViewStatus]=useState(readOnly?"connecting":"idle"); // connecting | live | notfound
-  const [viewMeta,setViewMeta]=useState(null); // {updatedAt}
+  const [liveEditable,setLiveEditable]=useState(false); // host-controlled: can joined viewers also edit?
+  const [viewStatus,setViewStatus]=useState(joined?"connecting":"idle"); // connecting | live | notfound
+  const [viewMeta,setViewMeta]=useState(null); // {updatedAt, editable}
+  const liveDocCode=viewCode||liveCode;
+  // A joined session can edit once the host has flipped "editable" on for the shared doc.
+  const canEditJoined=joined&&viewMeta?.editable===true;
+  const readOnly=joined&&!canEditJoined;
 
   function currentStateSnapshot(){
     return{players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels};
@@ -518,26 +524,47 @@ export default function FrogTournament(){
   // Persist (skipped in read-only viewer mode — that browser is just watching someone
   // else's tournament, it shouldn't overwrite whatever local tournament it had, if any)
   useEffect(()=>{
-    if(readOnly)return;
+    if(joined)return;
     try{localStorage.setItem(STORAGE_KEY,JSON.stringify({players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels,liveCode}));}
     catch(e){}
-  },[readOnly,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels,liveCode]);
+  },[joined,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels,liveCode]);
 
-  // Live sharing: while liveCode is set, push the current tournament state to Firestore
-  // (debounced) so anyone with the view link sees it update in near real time.
+  // Tracks the JSON this browser itself last wrote to Firestore, so the subscription below
+  // can tell "the server confirming my own edit" apart from "someone else's edit arrived" —
+  // otherwise a client that both pushes and listens (host, or an editor) would loop forever
+  // re-applying and re-pushing its own echoed writes.
+  const lastPushedRef=useRef(null);
+
+  // Live sharing (host): while liveCode is set, push the current tournament state to
+  // Firestore (debounced) so anyone with the view link sees it update in near real time.
   useEffect(()=>{
-    if(readOnly||!liveCode)return;
+    if(joined||!liveCode)return;
     setLiveStatus("connecting");
     const snapshot=currentStateSnapshot();
     const clean=fsSanitize(JSON.parse(JSON.stringify(snapshot))); // Firestore rejects `undefined` fields and nested arrays
     const t=setTimeout(()=>{
-      setDoc(doc(db,"tournaments",liveCode),{state:clean,updatedAt:Date.now()},{merge:false})
+      lastPushedRef.current=JSON.stringify(clean);
+      setDoc(doc(db,"tournaments",liveCode),{state:clean,updatedAt:Date.now(),editable:liveEditable},{merge:false})
         .then(()=>setLiveStatus("live"))
         .catch(()=>setLiveStatus("error"));
     },600);
     return()=>clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[readOnly,liveCode,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
+  },[joined,liveCode,liveEditable,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
+
+  // Live editing (joined session): once the host has turned editing on for this share link,
+  // push this browser's changes back to the same shared doc too (debounced), same as the host.
+  useEffect(()=>{
+    if(!canEditJoined)return;
+    const snapshot=currentStateSnapshot();
+    const clean=fsSanitize(JSON.parse(JSON.stringify(snapshot)));
+    const t=setTimeout(()=>{
+      lastPushedRef.current=JSON.stringify(clean);
+      setDoc(doc(db,"tournaments",viewCode),{state:clean,updatedAt:Date.now()},{merge:true}).catch(()=>{});
+    },600);
+    return()=>clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[canEditJoined,viewCode,players,rrMode,rrNumRounds,rrRounds,numPlayoffBrackets,bracketAssignmentOverrides,playoffBrackets,nextBracketId,nextId,poolPlay,numPools,poolAssignments,poolRounds,advanceCount,playoffPairingMode,poolQualifierOverrides,courtsEnabled,numCourts,customCourtLabels]);
 
   function goLive(){
     setLiveCode(prev=>prev||makeLiveCode());
@@ -546,23 +573,30 @@ export default function FrogTournament(){
     if(liveCode)deleteDoc(doc(db,"tournaments",liveCode)).catch(()=>{});
     setLiveCode(null);
     setLiveStatus("idle");
+    setLiveEditable(false);
   }
 
-  // Viewer mode: subscribe to the live tournament and apply every update as it arrives.
-  const viewerFirstLoad=useRef(true);
+  // Subscribe to the shared live doc — for the host (to see a co-editor's changes as they
+  // happen) and for a joined session (to see the host's changes, view-only or editable).
+  const firstSnapshotRef=useRef(true);
   useEffect(()=>{
-    if(!viewCode)return;
-    const unsub=onSnapshot(doc(db,"tournaments",viewCode),snap=>{
-      if(!snap.exists()){setViewStatus("notfound");return;}
+    if(!liveDocCode)return;
+    const unsub=onSnapshot(doc(db,"tournaments",liveDocCode),snap=>{
+      if(!snap.exists()){if(joined)setViewStatus("notfound");return;}
       const data=snap.data();
-      applyState(fsUnsanitize(data.state||{}),{resetNav:viewerFirstLoad.current});
-      viewerFirstLoad.current=false;
-      setViewMeta({updatedAt:data.updatedAt});
-      setViewStatus("live");
-    },()=>setViewStatus("notfound"));
+      const rawState=JSON.stringify(data.state||{});
+      if(rawState!==lastPushedRef.current){
+        applyState(fsUnsanitize(data.state||{}),{resetNav:joined&&firstSnapshotRef.current});
+      }
+      firstSnapshotRef.current=false;
+      if(joined){
+        setViewMeta({updatedAt:data.updatedAt,editable:data.editable===true});
+        setViewStatus("live");
+      }
+    },()=>{if(joined)setViewStatus("notfound");});
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[viewCode]);
+  },[liveDocCode]);
 
   useEffect(()=>{
     if(!toast)return;
@@ -1339,11 +1373,18 @@ export default function FrogTournament(){
           {pinnedPairs.length>0&&<span style={{...S.badge(C.amber),fontSize:13}}>{pinnedPairs.length} Pairs</span>}
           {!poolPlay&&rrRounds.length>0&&<span style={{...S.badge(C.blue),fontSize:13}}>{rrRounds.length} Games/Player</span>}
           {playoffBrackets.length>0&&<span style={{...S.badge(C.green),fontSize:13}}>{playoffBrackets.length} Playoff Bracket{playoffBrackets.length!==1?"s":""}</span>}
-          {readOnly?(
-            <span style={{...S.badge(viewStatus==="live"?C.red:C.gray),fontSize:13,display:"flex",alignItems:"center",gap:6}}>
-              {viewStatus==="live"&&<span style={{width:7,height:7,borderRadius:"50%",background:C.white,display:"inline-block"}}/>}
-              {viewStatus==="connecting"?"Connecting…":viewStatus==="notfound"?"Tournament not found":"Live view"}
-            </span>
+          {joined?(
+            canEditJoined?(
+              <span style={{...S.badge(C.green),fontSize:13,display:"flex",alignItems:"center",gap:6}}>
+                <span style={{width:7,height:7,borderRadius:"50%",background:C.white,display:"inline-block"}}/>
+                ✏️ Editing live
+              </span>
+            ):(
+              <span style={{...S.badge(viewStatus==="live"?C.red:C.gray),fontSize:13,display:"flex",alignItems:"center",gap:6}}>
+                {viewStatus==="live"&&<span style={{width:7,height:7,borderRadius:"50%",background:C.white,display:"inline-block"}}/>}
+                {viewStatus==="connecting"?"Connecting…":viewStatus==="notfound"?"Tournament not found":"Live view"}
+              </span>
+            )
           ):(
             <>
               {liveCode?(
@@ -1362,20 +1403,24 @@ export default function FrogTournament(){
         </div>
       </div>
 
-      {readOnly&&(
-        <div style={{background:C.amber,color:C.white,textAlign:"center",padding:"8px 16px",fontWeight:700,fontSize:13}}>
-          👁️ You're viewing a live tournament — read-only. Changes made by the host will appear automatically.
+      {joined&&(
+        <div style={{background:canEditJoined?C.green:C.amber,color:C.white,textAlign:"center",padding:"8px 16px",fontWeight:700,fontSize:13}}>
+          {canEditJoined?"✏️ You're editing a live tournament — your changes sync to everyone else in real time.":"👁️ You're viewing a live tournament — read-only. Changes made by the host will appear automatically."}
           {viewMeta?.updatedAt&&<span style={{fontWeight:500,opacity:0.85}}> · Updated {new Date(viewMeta.updatedAt).toLocaleTimeString()}</span>}
         </div>
       )}
 
-      {showLiveModal&&!readOnly&&(
+      {showLiveModal&&!joined&&(
         <div style={S.overlay} onClick={()=>setShowLiveModal(false)}>
           <div style={S.modal} onClick={e=>e.stopPropagation()}>
             <div style={{fontWeight:800,fontSize:16,color:C.greenDark,marginBottom:6}}>📡 Live tournament</div>
             <div style={{fontSize:13,color:C.gray,marginBottom:16}}>
-              Anyone with this link can watch scores and standings update live, in real time, from any device — they can't edit anything.
+              Anyone with this link can watch scores and standings update live, in real time, from any device.
             </div>
+            <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,cursor:"pointer",fontSize:13,fontWeight:600,color:C.greenDark}}>
+              <input type="checkbox" checked={liveEditable} onChange={e=>setLiveEditable(e.target.checked)}/>
+              ✏️ Let people with this link edit too (not just watch)
+            </label>
             {(() => {
               const link=`${window.location.origin}${window.location.pathname}?view=${liveCode}`;
               return(
