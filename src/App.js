@@ -534,15 +534,31 @@ export default function FrogTournament(){
   // otherwise a client that both pushes and listens (host, or an editor) would loop forever
   // re-applying and re-pushing its own echoed writes.
   const lastPushedRef=useRef(null);
+  // Set right before the subscription applies someone ELSE's update to local state. Both push
+  // effects below check it and skip their very next run — without this, a client that both
+  // listens and pushes (the host, or a co-editor) would automatically re-broadcast whatever it
+  // just received a moment later (a full snapshot, merge:false on the host's side), and if the
+  // other person made another edit in between, that echoed rebroadcast would silently clobber
+  // it. This is what made a co-editor's changes seem to "not go through."
+  const suppressNextPushRef=useRef(false);
+  // True from the moment a genuine local edit starts its debounce until it's actually sent.
+  // The subscription below checks this and *skips* applying an incoming remote update while
+  // it's true — otherwise applyState's full-state overwrite would silently wipe out whatever
+  // this browser just typed but hasn't pushed yet, any time someone else's change happened to
+  // arrive in that window (this was the main reason a co-editor's edits "weren't going through").
+  const hasPendingEditRef=useRef(false);
 
   // Live sharing (host): while liveCode is set, push the current tournament state to
   // Firestore (debounced) so anyone with the view link sees it update in near real time.
   useEffect(()=>{
     if(joined||!liveCode)return;
+    if(suppressNextPushRef.current){suppressNextPushRef.current=false;return;}
+    hasPendingEditRef.current=true;
     setLiveStatus("connecting");
     const snapshot=currentStateSnapshot();
     const clean=fsSanitize(JSON.parse(JSON.stringify(snapshot))); // Firestore rejects `undefined` fields and nested arrays
     const t=setTimeout(()=>{
+      hasPendingEditRef.current=false;
       lastPushedRef.current=JSON.stringify(clean);
       setDoc(doc(db,"tournaments",liveCode),{state:clean,updatedAt:Date.now(),editable:liveEditable},{merge:false})
         .then(()=>setLiveStatus("live"))
@@ -556,9 +572,12 @@ export default function FrogTournament(){
   // push this browser's changes back to the same shared doc too (debounced), same as the host.
   useEffect(()=>{
     if(!canEditJoined)return;
+    if(suppressNextPushRef.current){suppressNextPushRef.current=false;return;}
+    hasPendingEditRef.current=true;
     const snapshot=currentStateSnapshot();
     const clean=fsSanitize(JSON.parse(JSON.stringify(snapshot)));
     const t=setTimeout(()=>{
+      hasPendingEditRef.current=false;
       lastPushedRef.current=JSON.stringify(clean);
       setDoc(doc(db,"tournaments",viewCode),{state:clean,updatedAt:Date.now()},{merge:true}).catch(()=>{});
     },600);
@@ -585,7 +604,8 @@ export default function FrogTournament(){
       if(!snap.exists()){if(joined)setViewStatus("notfound");return;}
       const data=snap.data();
       const rawState=JSON.stringify(data.state||{});
-      if(rawState!==lastPushedRef.current){
+      if(rawState!==lastPushedRef.current&&!hasPendingEditRef.current){
+        suppressNextPushRef.current=true;
         applyState(fsUnsanitize(data.state||{}),{resetNav:joined&&firstSnapshotRef.current});
       }
       firstSnapshotRef.current=false;
