@@ -956,17 +956,45 @@ export default function FrogTournament(){
   }
 
   function removePlayer(id){setPlayers(prev=>prev.filter(p=>p.id!==id).map(p=>p.pinnedPartnerId===id?{...p,pinnedPartnerId:null}:p));}
-  function saveEditPlayer(id,name){setPlayers(prev=>prev.map(p=>p.id===id?{...p,name}:p));setEditingPlayer(null);}
+
+  // A player's name gets copied into every match a schedule was generated for (team1/team2
+  // hold snapshots of the player, not just an id), plus playoff entries — so a rename has to
+  // cascade into all of those, not just the roster, or old names linger in Pool Play, Pool
+  // Standings and Playoffs even though Pool Setup (which looks the id up live) shows the new one.
+  function patchRoundsPlayerName(rounds,id,name){
+    return rounds.map(round=>round.map(match=>({...match,
+      team1:Array.isArray(match.team1)?match.team1.map(p=>p&&p.id===id?{...p,name}:p):match.team1,
+      team2:Array.isArray(match.team2)?match.team2.map(p=>p&&p.id===id?{...p,name}:p):match.team2,
+    })));
+  }
+  function patchEntryPlayerName(entry,id,name){
+    const patched={...entry};
+    if(patched.id===id)patched.name=name;
+    if(Array.isArray(patched.players))patched.players=patched.players.map(p=>p&&p.id===id?{...p,name}:p);
+    return patched;
+  }
+  function renamePlayerEverywhere(id,name){
+    setPlayers(prev=>prev.map(p=>p.id===id?{...p,name}:p));
+    setRrRounds(prev=>patchRoundsPlayerName(prev,id,name));
+    setPoolRounds(prev=>{const next={};Object.keys(prev).forEach(k=>{next[k]=patchRoundsPlayerName(prev[k],id,name);});return next;});
+    setPlayoffBrackets(prev=>prev.map(b=>({...b,rounds:patchRoundsPlayerName(b.rounds,id,name)})));
+    // Pool qualifier overrides (manually toggled in Pool Standings) snapshot each entry too.
+    setPoolQualifierOverrides(prev=>{
+      const next={};
+      Object.keys(prev).forEach(k=>{next[k]=prev[k].map(e=>patchEntryPlayerName(e,id,name));});
+      return next;
+    });
+  }
+
+  function saveEditPlayer(id,name){
+    if(!name.trim())return;
+    renamePlayerEverywhere(id,name.trim());
+    setEditingPlayer(null);
+  }
 
   function saveRrName(id,name){
     if(!name.trim())return;
-    setPlayers(prev=>prev.map(p=>p.id===id?{...p,name:name.trim()}:p));
-    const patchRounds=rounds=>rounds.map(round=>round.map(match=>({...match,
-      team1:Array.isArray(match.team1)?match.team1.map(p=>p&&p.id===id?{...p,name:name.trim()}:p):match.team1,
-      team2:Array.isArray(match.team2)?match.team2.map(p=>p&&p.id===id?{...p,name:name.trim()}:p):match.team2,
-    })));
-    setRrRounds(patchRounds);
-    setPoolRounds(prev=>{const next={};Object.keys(prev).forEach(k=>{next[k]=patchRounds(prev[k]);});return next;});
+    renamePlayerEverywhere(id,name.trim());
     setRrEditingName(null);
   }
 
