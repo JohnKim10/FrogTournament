@@ -244,8 +244,58 @@ function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimi
   });
 }
 
+// Singles RR: no partners at all — each side of a match is one player, so a "team" here is
+// just a one-element array and everything downstream (standings, brackets, swapping, courts)
+// keeps working unchanged. The circle method gives everyone a different opponent each round;
+// with an odd number of players it also rotates who has no opponent that round.
+function generateSinglesRoundRobin(players,numRounds,firstRoundByeIds,matchLimit){
+  const matchesAllowed=Math.min(Math.floor(players.length/2),matchLimit??Infinity);
+  const sitOutCount=Math.max(0,players.length-matchesAllowed*2);
+  // Decide who sits out *first*, always taking from whoever has sat out fewest times so far
+  // (random tie-break). That caps the spread in sit-outs at one for any number of rounds,
+  // while still mixing up who sits together — a strict rotation queue keeps benching the same
+  // group as a block, which would quietly stop half the field from ever playing the other
+  // half. Capping whole matches after pairing instead would be worse still: a match is only
+  // as "rested" as its least-rested player, so one person can get benched over and over.
+  const sitCounts={};players.forEach(p=>{sitCounts[p.id]=0;});
+  const byId={};players.forEach(p=>{byId[p.id]=p;});
+  const met={};
+  const pairKey=(a,b)=>[a,b].sort((x,y)=>x-y).join("-");
+  const rounds=[];
+  for(let r=0;r<numRounds;r++){
+    const forced=r===0&&firstRoundByeIds?firstRoundByeIds.filter(id=>byId[id]):[];
+    const forcedSet=new Set(forced);
+    // Shuffle first, then a stable sort by sit-out count = fewest sit-outs first, ties random.
+    const pool=shuffle(players.filter(p=>!forcedSet.has(p.id)))
+      .sort((a,b)=>sitCounts[a.id]-sitCounts[b.id]);
+    const sitOutIds=[...forced,...pool.slice(0,Math.max(0,sitOutCount-forced.length)).map(p=>p.id)];
+    const sitOutSet=new Set(sitOutIds);
+    const active=shuffle(players.filter(p=>!sitOutSet.has(p.id)));
+    // Pair whoever's left, always handing each player the opponent they've faced fewest times
+    // so far, so people cycle through new opponents before anyone gets a rematch.
+    const matches=[];
+    while(active.length>1){
+      const a=active.shift();
+      let bestIdx=0,bestCount=Infinity;
+      active.forEach((c,i)=>{const n=met[pairKey(a.id,c.id)]||0;if(n<bestCount){bestCount=n;bestIdx=i;}});
+      const b=active.splice(bestIdx,1)[0];
+      met[pairKey(a.id,b.id)]=(met[pairKey(a.id,b.id)]||0)+1;
+      matches.push({team1:[a],team2:[b],score1:"",score2:""});
+    }
+    // An odd player left over after pairing sat out too, so they count towards their tally —
+    // otherwise they could be picked to sit again the very next round.
+    [...sitOutIds,...active.map(p=>p.id)].forEach(id=>{sitCounts[id]=(sitCounts[id]||0)+1;});
+    rounds.push(matches);
+  }
+  return rounds;
+}
+
+// Doubles needs four people to make a match; singles only needs two.
+function minPlayersFor(mode){return mode==="singles"?2:4;}
+
 function generateRoundRobinRounds(players,mode,numRounds,firstRoundByeIds,matchLimit){
-  if(players.length<4)return[];
+  if(players.length<minPlayersFor(mode))return[];
+  if(mode==="singles")return generateSinglesRoundRobin(players,numRounds,firstRoundByeIds,matchLimit);
   return mode==="fixed"?generateFixedRoundRobin(players,numRounds,matchLimit):generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimit);
 }
 
@@ -706,14 +756,14 @@ export default function FrogTournament(){
   // matched up two at a time (one team sits out if that count is odd) — whatever's left
   // over after both steps (plus anyone extra a court limit forces out) is how many players
   // get no game in Round 1. Simulated with the real generator so it always matches reality.
-  const rotatingFirstRoundByeInfo = useMemo(()=>{
-    if(rrMode!=="rotating"||players.length<4)return{needed:0,eligible:[]};
-    const{free}=extractPinnedPairs(players);
-    const round0=generateRotatingRoundRobin(players,1,null,courtMatchLimit)[0]||[];
+  const firstRoundByeInfo = useMemo(()=>{
+    if(rrMode==="fixed"||players.length<minPlayersFor(rrMode))return{needed:0,eligible:[]};
+    const eligible=rrMode==="singles"?players:extractPinnedPairs(players).free;
+    const round0=generateRoundRobinRounds(players,rrMode,1,null,courtMatchLimit)[0]||[];
     const playingIds=new Set();
-    round0.forEach(m=>[m.team1,m.team2].forEach(t=>t.forEach(p=>p&&playingIds.add(p.id))));
-    const sittingFree=free.filter(p=>!playingIds.has(p.id));
-    return{needed:sittingFree.length,eligible:free};
+    round0.forEach(m=>[m.team1,m.team2].forEach(t=>{if(Array.isArray(t))t.forEach(p=>p&&playingIds.add(p.id));}));
+    const sitting=eligible.filter(p=>!playingIds.has(p.id));
+    return{needed:sitting.length,eligible};
   },[players,rrMode,courtMatchLimit]);
 
   // ─── Derived: units for pool play (pairs in fixed, individuals in rotating)
@@ -761,6 +811,8 @@ export default function FrogTournament(){
           uniqueRounds.push(round);rotating.unshift(rotating.pop());
         }
         perPoolUncapped[p]=Array.from({length:rrNumRounds},(_,r)=>uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[]);
+      } else if(rrMode==="singles"){
+        perPoolUncapped[p]=generateSinglesRoundRobin(poolUnitList,rrNumRounds);
       } else {
         perPoolUncapped[p]=generateRotatingRoundRobin(poolUnitList,rrNumRounds);
       }
@@ -794,7 +846,7 @@ export default function FrogTournament(){
 
   // ─── Non-pool RR
   function generateRR(){
-    const byeIds=rotatingFirstRoundByeInfo.needed>0&&firstRoundByeIds.length>0?firstRoundByeIds:null;
+    const byeIds=firstRoundByeInfo.needed>0&&firstRoundByeIds.length>0?firstRoundByeIds:null;
     const rounds=generateRoundRobinRounds(players,rrMode,rrNumRounds,byeIds,courtMatchLimit);
     setRrRounds(rounds);
     setTab(1);
@@ -869,6 +921,11 @@ export default function FrogTournament(){
 
   function defaultBracketName(i){return`Playoff ${String.fromCharCode(65+i)}`;}
 
+  // How many bracket slots a bucket of entries fills: rotating-mode entries are individuals
+  // that get paired into doubles teams first, so they fill half as many slots. Fixed teams
+  // and singles players each take a slot of their own.
+  function bracketTeamCount(entryCount){return rrMode==="rotating"?Math.floor(entryCount/2):entryCount;}
+
   // ─── Generate every playoff bracket from the current entry pool + assignment
   function generateAllPlayoffBrackets(){
     const entries=getPlayoffEntryPool();
@@ -876,14 +933,14 @@ export default function FrogTournament(){
     const isFixed=rrMode==="fixed";
     let idCounter=nextBracketId;
     const newBrackets=perBracket.map((bucket,i)=>{
-      // Rotating-mode entries are individuals that get paired up into teams first, so the
-      // bracket only needs enough rounds for half as many slots as there are individuals.
-      const teamCount=isFixed?bucket.length:Math.floor(bucket.length/2);
-      const numRounds=autoRoundsForCount(teamCount);
+      const numRounds=autoRoundsForCount(bracketTeamCount(bucket.length));
       let rounds;
       if(isFixed){
         const pairs=bucket.map((e,idx)=>({players:e.raw.players,seed:idx+1}));
         rounds=buildBracketFromPairs(pairs,numRounds);
+      } else if(rrMode==="singles"){
+        // Each player is their own one-person "team", seeded straight down the standings.
+        rounds=buildBracketFromPairs(bucket.map((e,idx)=>({players:[e.raw],seed:idx+1})),numRounds);
       } else if(playoffPairingMode==="1-2"){
         const pairs=[];
         for(let k=0;k+1<bucket.length;k+=2)pairs.push({players:[bucket[k].raw,bucket[k+1].raw],seed:Math.floor(k/2)+1});
@@ -1044,6 +1101,7 @@ export default function FrogTournament(){
   }
 
   const standings=useMemo(()=>rrMode==="fixed"?computePairStandings(rrRounds):computeStandings(players,rrRounds),[players,rrRounds,rrMode]);
+  const minPlayers=minPlayersFor(rrMode);
   const pinnedPairs=useMemo(()=>extractPinnedPairs(players).pinnedPairs,[players]);
   const TABS=poolPlay?TABS_POOL:TABS_NORMAL;
 
@@ -1543,14 +1601,15 @@ export default function FrogTournament(){
                 </div>
               </div>
 
-              {/* Partner mode */}
+              {/* Match type */}
               <div style={{marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:700,color:C.greenDark,marginBottom:6}}>Partner Mode</div>
+                <div style={{fontSize:13,fontWeight:700,color:C.greenDark,marginBottom:6}}>Match Type</div>
                 <div style={{display:"flex",borderRadius:8,overflow:"hidden",border:`1.5px solid ${C.grayLight}`,width:"fit-content"}}>
                   <button style={S.modeBtn(rrMode==="rotating")} onClick={()=>setRrMode("rotating")}>🔄 Rotating</button>
                   <button style={S.modeBtn(rrMode==="fixed")} onClick={()=>setRrMode("fixed")}>🔒 Fixed</button>
+                  <button style={S.modeBtn(rrMode==="singles")} onClick={()=>setRrMode("singles")}>🏓 Singles</button>
                 </div>
-                <div style={{fontSize:12,color:C.gray,marginTop:4}}>{rrMode==="rotating"?"New partner each round.":"Same partner throughout."}</div>
+                <div style={{fontSize:12,color:C.gray,marginTop:4}}>{rrMode==="rotating"?"Doubles — new partner each round.":rrMode==="fixed"?"Doubles — same partner throughout.":"Singles — 1 vs 1, no partners."}</div>
               </div>
 
               {/* Must pair (fixed mode) */}
@@ -1576,14 +1635,14 @@ export default function FrogTournament(){
               )}
 
               {/* First-round bye picker (rotating mode, when a team must sit out) */}
-              {!poolPlay&&rotatingFirstRoundByeInfo.needed>0&&(
+              {!poolPlay&&firstRoundByeInfo.needed>0&&(
                 <div style={{marginBottom:16,padding:"14px 16px",borderRadius:10,background:C.cream,border:`1.5px solid ${C.grayLight}`}}>
                   <div style={{fontSize:13,fontWeight:800,color:C.greenDark,marginBottom:6}}>😴 Round 1 Bye (optional)</div>
-                  <div style={{fontSize:12,color:C.gray,marginBottom:8}}>With {players.length} players, {rotatingFirstRoundByeInfo.needed} will sit out Round 1. Pick who (e.g. players running late) or leave blank to randomize.</div>
+                  <div style={{fontSize:12,color:C.gray,marginBottom:8}}>With {players.length} players, {firstRoundByeInfo.needed} will sit out Round 1. Pick who (e.g. players running late) or leave blank to randomize.</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-                    {rotatingFirstRoundByeInfo.eligible.map(p=>{
+                    {firstRoundByeInfo.eligible.map(p=>{
                       const checked=firstRoundByeIds.includes(p.id);
-                      const disabled=!checked&&firstRoundByeIds.length>=rotatingFirstRoundByeInfo.needed;
+                      const disabled=!checked&&firstRoundByeIds.length>=firstRoundByeInfo.needed;
                       return(
                         <label key={p.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:13,fontWeight:600,padding:"6px 10px",borderRadius:8,background:checked?"#F0FAE8":C.white,border:`1.5px solid ${checked?C.lime:C.grayLight}`,opacity:disabled?0.5:1,cursor:disabled?"not-allowed":"pointer"}}>
                           <input type="checkbox" checked={checked} disabled={disabled}
@@ -1683,15 +1742,15 @@ export default function FrogTournament(){
 
             {!readOnly&&<div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
               {poolPlay?(
-                <button style={S.bigBtn("blue")} onClick={()=>setTab(1)} disabled={players.length<4}>
+                <button style={S.bigBtn("blue")} onClick={()=>setTab(1)} disabled={players.length<minPlayers}>
                   Next: Set Up Pools →
                 </button>
               ):(
-                <button style={S.bigBtn("blue")} onClick={generateRR} disabled={players.length<4}>
-                  🎲 Generate All Play Schedule
+                <button style={S.bigBtn("blue")} onClick={generateRR} disabled={players.length<minPlayers}>
+                  🎲 Generate {rrMode==="singles"?"Singles":"All Play"} Schedule
                 </button>
               )}
-              {players.length<4&&<span style={{color:C.limeLight,fontSize:13,alignSelf:"center"}}>Need at least 4 players</span>}
+              {players.length<minPlayers&&<span style={{color:C.limeLight,fontSize:13,alignSelf:"center"}}>Need at least {minPlayers} players</span>}
             </div>}
           </div>
         )}
@@ -1920,7 +1979,7 @@ export default function FrogTournament(){
                       return(
                         <div key={bIdx} style={{borderRadius:10,overflow:"hidden",border:`2px solid ${color}`}}>
                           <div style={{background:color,padding:"8px 14px",fontWeight:800,fontSize:14,color:C.white}}>
-                            {playoffBrackets[bIdx]?.name??defaultBracketName(bIdx)} <span style={{fontWeight:400,fontSize:12,opacity:0.85}}>({bucket.length} · {autoRoundsForCount(rrMode==="fixed"?bucket.length:Math.floor(bucket.length/2))}-round)</span>
+                            {playoffBrackets[bIdx]?.name??defaultBracketName(bIdx)} <span style={{fontWeight:400,fontSize:12,opacity:0.85}}>({bucket.length} · {autoRoundsForCount(bracketTeamCount(bucket.length))}-round)</span>
                           </div>
                           <div style={{padding:10,background:C.white,maxHeight:360,overflowY:"auto"}}>
                             {entryPool.map(e=>{
