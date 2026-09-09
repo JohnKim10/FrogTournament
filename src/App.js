@@ -189,14 +189,12 @@ function generateFreeRotatingSchedule(free,numRounds,firstRoundByeIds,matchLimit
   return rounds;
 }
 
-// Fixed RR: teams circle-rotate against each other
-function generateFixedRoundRobin(players,numRounds,matchLimit){
-  const{pinnedPairs,free}=extractPinnedPairs(players);
-  const shuffledFree=shuffle(free),freePairs=[];
-  for(let i=0;i+1<shuffledFree.length;i+=2)freePairs.push([shuffledFree[i],shuffledFree[i+1]]);
-  const allTeams=[...pinnedPairs,...freePairs];
-  if(allTeams.length<2)return[];
-  const arr=allTeams.length%2===0?[...allTeams]:[...allTeams,null];
+// Circle-rotates already-formed teams against each other. Used wherever the teams are fixed
+// up front — Fixed mode, and Rotating when every player is pinned to a partner (there's
+// nobody left to rotate, so those pairs just play each other).
+function teamRoundRobin(teams,numRounds,matchLimit){
+  if(teams.length<2)return[];
+  const arr=teams.length%2===0?[...teams]:[...teams,null];
   const n=arr.length,half=n/2,rotating=arr.slice(1),uniqueRounds=[];
   for(let r=0;r<n-1;r++){
     const circle=[arr[0],...rotating],round=[];
@@ -208,6 +206,14 @@ function generateFixedRoundRobin(players,numRounds,matchLimit){
     const round=uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[];
     return capMatchesToCourts(round,lastUsed,matchLimit);
   });
+}
+
+// Fixed RR: teams circle-rotate against each other
+function generateFixedRoundRobin(players,numRounds,matchLimit){
+  const{pinnedPairs,free}=extractPinnedPairs(players);
+  const shuffledFree=shuffle(free),freePairs=[];
+  for(let i=0;i+1<shuffledFree.length;i+=2)freePairs.push([shuffledFree[i],shuffledFree[i+1]]);
+  return teamRoundRobin([...pinnedPairs,...freePairs],numRounds,matchLimit);
 }
 
 // Drops the lowest-court-priority matches when there are more matches than available courts,
@@ -230,7 +236,10 @@ function capMatchesToCourts(matches,lastUsed,matchLimit){
 // Rotating RR: individuals rotate partners
 function generateRotatingRoundRobin(players,numRounds,firstRoundByeIds,matchLimit){
   const{pinnedPairs,free}=extractPinnedPairs(players);
-  if(free.length===0)return buildRRSchedule(pinnedPairs,numRounds,null,matchLimit);
+  // Everyone has a locked-in partner, so there are no partners left to rotate — play those
+  // teams off against each other. (Feeding the pairs through the individual-slot scheduler
+  // instead used to build teams-of-teams, which rendered as blank players and crashed.)
+  if(free.length===0)return teamRoundRobin(pinnedPairs,numRounds,matchLimit);
   if(pinnedPairs.length===0)return generateFreeRotatingSchedule(free,numRounds,firstRoundByeIds,matchLimit);
   // Pinned partners mixed with free players is a rarer case — build the free players' own
   // schedule uncapped, then combine with the pinned teams and apply the real court limit
@@ -448,18 +457,22 @@ function getPoolUnits(units, assignments, poolIdx) {
 }
 
 // ─── RR Team Block ────────────────────────────────────────────────────────────
-function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,roundPlayerIds,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx,readOnly}){
+function RRTeamBlock({team,side,isWinner,hasWinner,rrEditingName,setRrEditingName,saveRrName,players,onSwap,swapTarget,setSwapTarget,rIdx,mIdx,poolIdx,readOnly}){
   if(!team||team.length===0)return<div style={{flex:1}}/>;
   const alignRight=side==="team1";
   return(
     <div style={{flex:1,textAlign:alignRight?"right":"left"}}>
       {team.filter(Boolean).map((p,pi)=>{
-        if(!p)return null;
+        // Guard against an id-less entry: `rrEditingName?.playerId===p.id` would otherwise be
+        // undefined===undefined for one, opening the name editor against a null and taking the
+        // whole app down with it.
+        if(!p||p.id==null)return null;
         const isEditing=!readOnly&&rrEditingName?.playerId===p.id;
         const isSwapping=!readOnly&&swapTarget?.rIdx===rIdx&&swapTarget?.mIdx===mIdx&&swapTarget?.poolIdx===poolIdx&&swapTarget?.side===side&&swapTarget?.playerId===p.id;
-        // Only players not already playing elsewhere this round can be swapped in, so a swap can
-        // never create a duplicate (the same player appearing in two spots in one round).
-        const available=players.filter(pl=>!roundPlayerIds.has(pl.id));
+        // Anyone but this player can be swapped in. Someone already playing this round trades
+        // places with them (see swapRRPlayer), so a swap still can't leave the same player
+        // listed in two spots — while a bench player simply subs in.
+        const available=players.filter(pl=>pl.id!==p.id);
         return(
           <div key={p.id} style={{marginBottom:pi>0?0:2}}>
             {pi>0&&<span style={{color:C.gray,fontWeight:400,fontSize:13}}> & </span>}
@@ -803,14 +816,8 @@ export default function FrogTournament(){
     for(let p=0;p<numPools;p++){
       const poolUnitList=getPool(p);
       if(rrMode==="fixed"){
-        const arr=poolUnitList.length%2===0?[...poolUnitList]:[...poolUnitList,null];
-        const n=arr.length,half=n/2,rotating=arr.slice(1),uniqueRounds=[];
-        for(let r=0;r<n-1;r++){
-          const circle=[arr[0],...rotating],round=[];
-          for(let i=0;i<half;i++){const t1=circle[i],t2=circle[n-1-i];if(t1&&t2)round.push({team1:t1,team2:t2,score1:"",score2:""});}
-          uniqueRounds.push(round);rotating.unshift(rotating.pop());
-        }
-        perPoolUncapped[p]=Array.from({length:rrNumRounds},(_,r)=>uniqueRounds.length?uniqueRounds[r%uniqueRounds.length]:[]);
+        // Uncapped here on purpose — the court limit is applied across all pools together below.
+        perPoolUncapped[p]=teamRoundRobin(poolUnitList,rrNumRounds,undefined);
       } else if(rrMode==="singles"){
         perPoolUncapped[p]=generateSinglesRoundRobin(poolUnitList,rrNumRounds);
       } else {
@@ -1075,13 +1082,29 @@ export default function FrogTournament(){
     setRrEditingName(null);
   }
 
+  // Swaps one player in a round-robin round. The swap is applied across the whole round, not
+  // just the one slot: if the player coming in is already playing somewhere else this round,
+  // the two trade places rather than the incoming player being listed twice.
   function swapRRPlayer(rIdx,mIdx,side,outId,inId,poolIdx=null){
-    const inPlayer=players.find(p=>p.id===inId);if(!inPlayer)return;
-    const patchMatch=m=>{if(!Array.isArray(m[side]))return m;return{...m,[side]:m[side].map(p=>p&&p.id===outId?inPlayer:p)};};
+    const inPlayer=players.find(p=>p.id===inId),outPlayer=players.find(p=>p.id===outId);
+    if(!inPlayer||!outPlayer||inId===outId)return;
+    const patchRound=round=>round.map((m,mi)=>{
+      const next={...m};
+      ["team1","team2"].forEach(s=>{
+        if(!Array.isArray(m[s]))return;
+        next[s]=m[s].map(p=>{
+          if(!p)return p;
+          if(mi===mIdx&&s===side&&p.id===outId)return inPlayer;
+          if(p.id===inId)return outPlayer;
+          return p;
+        });
+      });
+      return next;
+    });
     if(poolIdx!==null){
-      setPoolRounds(prev=>{const poolR=[...(prev[poolIdx]||[])];poolR[rIdx]=poolR[rIdx].map((m,mi)=>mi!==mIdx?m:patchMatch(m));return{...prev,[poolIdx]:poolR};});
+      setPoolRounds(prev=>{const poolR=[...(prev[poolIdx]||[])];poolR[rIdx]=patchRound(poolR[rIdx]||[]);return{...prev,[poolIdx]:poolR};});
     } else {
-      setRrRounds(prev=>prev.map((r,ri)=>ri!==rIdx?r:r.map((m,mi)=>mi!==mIdx?m:patchMatch(m))));
+      setRrRounds(prev=>prev.map((r,ri)=>ri!==rIdx?r:patchRound(r)));
     }
   }
 
@@ -1419,7 +1442,7 @@ export default function FrogTournament(){
                       </div>
                     )}
                     <div style={S.matchCard}>
-                      <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
+                      <RRTeamBlock team={match.team1} side="team1" isWinner={w==="team1"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
                       <div style={{display:"flex",alignItems:"center",gap:6}}>
                         {readOnly?(
                           <>
@@ -1435,7 +1458,7 @@ export default function FrogTournament(){
                           </>
                         )}
                       </div>
-                      <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} roundPlayerIds={playingIds} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
+                      <RRTeamBlock team={match.team2} side="team2" isWinner={w==="team2"} hasWinner={!!w} rrEditingName={rrEditingName} setRrEditingName={setRrEditingName} saveRrName={saveRrName} players={candidatePlayers} onSwap={swapRRPlayer} swapTarget={swapTarget} setSwapTarget={setSwapTarget} rIdx={rIdx} mIdx={mIdx} poolIdx={poolIdx} readOnly={readOnly}/>
                     </div>
                   </div>
                 );
