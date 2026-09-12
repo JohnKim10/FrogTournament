@@ -159,31 +159,66 @@ function buildRRSchedule(slots,numRounds,firstRoundByeIds,matchLimit){
 // how many rounds are generated or how tight the court limit is — nobody sits out twice
 // before everyone else has at least once (previously a greedy per-round choice could let
 // the same person get unlucky several times in a row).
+// Pairs a list off two at a time, preferring combinations that have come up least so far
+// (costOf returns how many times that combination has already happened). A single greedy pass
+// can paint itself into a corner — the last two left may be the one combination already used —
+// so this retries with fresh random orders and keeps the best, stopping as soon as it finds a
+// set with no repeats at all. An odd item is left unpaired for the caller to deal with.
+function bestPairing(items,costOf,attempts=200){
+  let best=null,bestCost=Infinity;
+  for(let t=0;t<attempts;t++){
+    const pool=shuffle(items),pairs=[];
+    let cost=0;
+    while(pool.length>1){
+      const a=pool.shift();
+      let bestIdx=0,bestC=Infinity;
+      pool.forEach((c,i)=>{const n=costOf(a,c);if(n<bestC){bestC=n;bestIdx=i;}});
+      cost+=bestC;
+      pairs.push([a,pool.splice(bestIdx,1)[0]]);
+    }
+    if(cost<bestCost){bestCost=cost;best=pairs;if(cost===0)break;}
+  }
+  return best||[];
+}
+
 function generateFreeRotatingSchedule(free,numRounds,firstRoundByeIds,matchLimit){
   const teamCount=Math.floor(free.length/2);
   const matchesAllowed=Math.min(Math.floor(teamCount/2),matchLimit??Infinity);
   const sitOutCount=Math.max(0,free.length-matchesAllowed*4);
-  let queue=shuffle(free).map(p=>p.id);
   const byId={};free.forEach(p=>{byId[p.id]=p;});
+  // The whole point of rotating mode is a different partner every round, so partnerships and
+  // match-ups are tracked across the schedule and the least-used one always wins. Pairing each
+  // round at random instead (which is what this used to do) repeats partners surprisingly
+  // often — with 8 players it's more likely than not within a few rounds.
+  const partnered={},opposed={},sitCounts={};
+  free.forEach(p=>{sitCounts[p.id]=0;});
+  const key=(a,b)=>[a,b].sort((x,y)=>x-y).join("-");
   const rounds=[];
   for(let r=0;r<numRounds;r++){
-    let sitOutIds;
-    if(r===0&&firstRoundByeIds&&firstRoundByeIds.length){
-      const forced=firstRoundByeIds.filter(id=>byId[id]);
-      const rest=queue.filter(id=>!forced.includes(id));
-      sitOutIds=[...forced,...rest.slice(0,Math.max(0,sitOutCount-forced.length))];
-    } else {
-      sitOutIds=queue.slice(0,sitOutCount);
-    }
+    // Sit-outs go to whoever has sat fewest times, ties broken at random: that caps the
+    // spread at one while still varying who sits together, so the field keeps mixing.
+    const forced=r===0&&firstRoundByeIds?firstRoundByeIds.filter(id=>byId[id]):[];
+    const forcedSet=new Set(forced);
+    const pool=shuffle(free.filter(p=>!forcedSet.has(p.id)))
+      .sort((a,b)=>sitCounts[a.id]-sitCounts[b.id]);
+    const sitOutIds=[...forced,...pool.slice(0,Math.max(0,sitOutCount-forced.length)).map(p=>p.id)];
     const sitOutSet=new Set(sitOutIds);
-    // Move everyone who sat out to the back of the queue (least eligible to sit again
-    // next), keeping everyone else's relative order — a plain FIFO rotation.
-    queue=[...queue.filter(id=>!sitOutSet.has(id)),...sitOutIds];
-    const active=shuffle(free.filter(p=>!sitOutSet.has(p.id)));
-    const teams=[];
-    for(let i=0;i+1<active.length;i+=2)teams.push([active[i],active[i+1]]);
-    const shuffledTeams=shuffle(teams),matches=[];
-    for(let i=0;i+1<shuffledTeams.length;i+=2)matches.push({team1:shuffledTeams[i],team2:shuffledTeams[i+1],score1:"",score2:""});
+
+    const active=free.filter(p=>!sitOutSet.has(p.id));
+    const teams=bestPairing(active,(a,b)=>partnered[key(a.id,b.id)]||0);
+    teams.forEach(([a,b])=>{partnered[key(a.id,b.id)]=(partnered[key(a.id,b.id)]||0)+1;});
+    // Then match the teams up, preferring sides who've faced each other least.
+    const matches=bestPairing(teams,(t1,t2)=>
+      t1.reduce((s,p1)=>s+t2.reduce((s2,p2)=>s2+(opposed[key(p1.id,p2.id)]||0),0),0)
+    ).map(([t1,t2])=>{
+      t1.forEach(p1=>t2.forEach(p2=>{opposed[key(p1.id,p2.id)]=(opposed[key(p1.id,p2.id)]||0)+1;}));
+      return{team1:t1,team2:t2,score1:"",score2:""};
+    });
+    // Anyone left without a match — the odd player out, or a leftover team when the team
+    // count is odd — sat this round out too, so it counts towards their tally.
+    const played=new Set();
+    matches.forEach(m=>[...m.team1,...m.team2].forEach(p=>played.add(p.id)));
+    free.forEach(p=>{if(!played.has(p.id))sitCounts[p.id]=(sitCounts[p.id]||0)+1;});
     rounds.push(matches);
   }
   return rounds;
@@ -280,20 +315,17 @@ function generateSinglesRoundRobin(players,numRounds,firstRoundByeIds,matchLimit
     const sitOutIds=[...forced,...pool.slice(0,Math.max(0,sitOutCount-forced.length)).map(p=>p.id)];
     const sitOutSet=new Set(sitOutIds);
     const active=shuffle(players.filter(p=>!sitOutSet.has(p.id)));
-    // Pair whoever's left, always handing each player the opponent they've faced fewest times
-    // so far, so people cycle through new opponents before anyone gets a rematch.
-    const matches=[];
-    while(active.length>1){
-      const a=active.shift();
-      let bestIdx=0,bestCount=Infinity;
-      active.forEach((c,i)=>{const n=met[pairKey(a.id,c.id)]||0;if(n<bestCount){bestCount=n;bestIdx=i;}});
-      const b=active.splice(bestIdx,1)[0];
+    // Pair whoever's left, giving each player the opponent they've faced fewest times so far,
+    // so people cycle through new opponents before anyone gets a rematch.
+    const matches=bestPairing(active,(a,b)=>met[pairKey(a.id,b.id)]||0).map(([a,b])=>{
       met[pairKey(a.id,b.id)]=(met[pairKey(a.id,b.id)]||0)+1;
-      matches.push({team1:[a],team2:[b],score1:"",score2:""});
-    }
+      return{team1:[a],team2:[b],score1:"",score2:""};
+    });
     // An odd player left over after pairing sat out too, so they count towards their tally —
     // otherwise they could be picked to sit again the very next round.
-    [...sitOutIds,...active.map(p=>p.id)].forEach(id=>{sitCounts[id]=(sitCounts[id]||0)+1;});
+    const played=new Set();
+    matches.forEach(m=>[...m.team1,...m.team2].forEach(p=>played.add(p.id)));
+    players.forEach(p=>{if(!played.has(p.id))sitCounts[p.id]=(sitCounts[p.id]||0)+1;});
     rounds.push(matches);
   }
   return rounds;
